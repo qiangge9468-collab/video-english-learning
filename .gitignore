@@ -1,0 +1,30 @@
+# Android / Gradle
+.gradle/
+.kotlin/
+build/
+app/build/
+app/.cxx/
+
+# Local machine configuration
+local.properties
+*.iml
+.idea/
+
+# Generated packages and native outputs
+*.apk
+*.aab
+*.so
+*.a
+*.o
+
+# Python helper cache
+__pycache__/
+*.pyc
+
+# On-device Whisper models are too large for Git.
+models/
+*.bin
+
+# OS noise
+.DS_Store
+Thumbs.db
