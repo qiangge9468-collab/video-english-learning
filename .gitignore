@@ -16,6 +16,10 @@ local.properties
 *.so
 *.a
 *.o
+!release/
+!release/*.apk
+!release/*.txt
+!release/*.md
 
 # Python helper cache
 __pycache__/

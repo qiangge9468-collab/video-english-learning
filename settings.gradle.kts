@@ -14,5 +14,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "看视频学英语"
+rootProject.name = "video-english-learning-remote"
 include(":app")

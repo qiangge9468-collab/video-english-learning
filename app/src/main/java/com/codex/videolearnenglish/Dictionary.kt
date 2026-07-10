@@ -132,7 +132,48 @@ object PhraseLibrary {
         "get into" to "进入；开始喜欢",
         "get ready" to "准备好",
         "take a look" to "看一看",
-        "take care of" to "照顾；处理"
+        "take care of" to "照顾；处理",
+        "thanks so much" to "非常感谢",
+        "thank you so much" to "非常感谢",
+        "so much" to "非常；这么多",
+        "for your help" to "感谢你的帮助；因为你的帮助",
+        "you bet" to "当然；没问题；不客气",
+        "let's see" to "让我想想；看看",
+        "pretty easy" to "相当简单",
+        "easy to do" to "容易做",
+        "plan on" to "计划；打算",
+        "planning on" to "正打算；正计划",
+        "in the field" to "在现场；在实地",
+        "cap in the field" to "在现场封盖/盖上",
+        "capping in the field" to "正在现场封盖/盖上",
+        "go ahead" to "继续；请便",
+        "pick up" to "拿起；学会；接人",
+        "put on" to "穿上；戴上；播放",
+        "take off" to "起飞；脱下；开始流行",
+        "come back" to "回来",
+        "back up" to "备份；支持；倒退",
+        "end up" to "最终；结果",
+        "run into" to "遇到；撞上",
+        "turn out" to "结果是；证明是",
+        "work out" to "解决；锻炼；进展",
+        "hang out" to "闲逛；一起待着",
+        "show up" to "出现；到场",
+        "hold on" to "等一下；坚持",
+        "move on" to "继续前进；进入下一步",
+        "as well" to "也；同样",
+        "at least" to "至少",
+        "by the way" to "顺便说一下",
+        "in terms of" to "就……而言",
+        "a little bit" to "一点点",
+        "sort of" to "有点；算是",
+        "of course" to "当然",
+        "make sense" to "有道理；讲得通",
+        "keep going" to "继续",
+        "get started" to "开始",
+        "get back" to "回来；取回",
+        "come in" to "进来；到达",
+        "go through" to "经历；仔细检查",
+        "come across" to "偶然遇到；给人……印象"
     )
 
     fun lookup(term: String): LookupResult? {
@@ -141,15 +182,17 @@ object PhraseLibrary {
     }
 
     fun findPhrases(text: String): List<PhraseSpan> {
-        val lower = text.lowercase(Locale.US)
+        val lower = text
+            .lowercase(Locale.US)
+            .replace(Regex("[\\u2018\\u2019\\u201B\\u2032]"), "'")
         return phrases.keys
-            .mapNotNull { phrase ->
+            .flatMap { phrase ->
                 val regex = Regex("\\b${Regex.escape(phrase)}\\b")
-                regex.find(lower)?.let { match ->
+                regex.findAll(lower).map { match ->
                     PhraseSpan(match.range.first, match.range.last + 1, phrase)
-                }
+                }.toList()
             }
-            .sortedWith(compareBy<PhraseSpan> { it.start }.thenByDescending { it.end - it.start })
+            .sortedWith(compareByDescending<PhraseSpan> { it.end - it.start }.thenBy { it.start })
     }
 }
 
