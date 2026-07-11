@@ -112,6 +112,7 @@ class LearningActivity : Activity() {
     private var trackMismatchWarningShown = false
     private var videoPreviewToken = 0
     private var pendingExportBilingual = false
+    private var translationInProgress = false
 
     private val pickVideoRequest = 81
     private val pickSubtitleRequest = 82
@@ -449,6 +450,7 @@ class LearningActivity : Activity() {
             displayMode = displayMode.next()
             updateButtons()
             renderSubtitles()
+            translateIfNeededForDisplay()
         }
         loopButton = controlButton("Loop On") {
             loopSentence = !loopSentence
@@ -457,6 +459,7 @@ class LearningActivity : Activity() {
         currentTranslationButton = controlButton("翻译关") {
             showCurrentTranslation = !showCurrentTranslation
             updateButtons()
+            translateIfNeededForDisplay()
         }
         subtitleControls.addView(currentTranslationButton)
         subtitleControls.addView(modeButton)
@@ -1430,9 +1433,11 @@ class LearningActivity : Activity() {
         return buildString {
             subtitles.forEachIndexed { index, line ->
                 append(index + 1).append('\n')
-                append(formatSrtTime(line.startMs + subtitleOffsetMs))
+                val start = line.startMs.coerceAtLeast(0)
+                val end = line.endMs.coerceAtLeast(start + 1)
+                append(formatSrtTime(start))
                     .append(" --> ")
-                    .append(formatSrtTime(line.endMs + subtitleOffsetMs))
+                    .append(formatSrtTime(end))
                     .append('\n')
                 append(line.englishText.trim()).append('\n')
                 if (bilingual && !line.chineseText.isNullOrBlank()) {
@@ -1467,6 +1472,16 @@ class LearningActivity : Activity() {
             return
         }
         startCaptionGenerationService()
+    }
+
+    private fun translateIfNeededForDisplay() {
+        if (translationInProgress || subtitles.isEmpty()) return
+        val wantsTranslation = showCurrentTranslation ||
+            displayMode == DisplayMode.CHINESE ||
+            displayMode == DisplayMode.BILINGUAL
+        if (wantsTranslation && subtitles.any { it.chineseText.isNullOrBlank() && it.englishText.isNotBlank() }) {
+            translateCurrentSubtitlesOnDevice()
+        }
     }
 
     private fun startCaptionGenerationService() {
@@ -1846,6 +1861,10 @@ class LearningActivity : Activity() {
     }
 
     private fun translateCurrentSubtitlesOnDevice() {
+        if (translationInProgress) {
+            statusText.text = "正在翻译字幕，请稍等..."
+            return
+        }
         val pending = subtitles
             .mapIndexed { index, line -> index to line }
             .filter { (_, line) -> line.chineseText.isNullOrBlank() && line.englishText.isNotBlank() }
@@ -1853,6 +1872,7 @@ class LearningActivity : Activity() {
             statusText.text = "当前字幕已经有中文翻译。"
             return
         }
+        translationInProgress = true
         val translator = englishChineseTranslator ?: createEnglishChineseTranslator().also {
             englishChineseTranslator = it
         }
@@ -1863,6 +1883,7 @@ class LearningActivity : Activity() {
                 translateSubtitleAt(translator, pending, 0)
             }
             .addOnFailureListener { error ->
+                translationInProgress = false
                 statusText.text = "手机端翻译模型准备失败：${error.message}"
                 Toast.makeText(this, "请先让手机联网下载一次英译中模型。下载后可离线翻译。", Toast.LENGTH_LONG).show()
             }
@@ -1874,6 +1895,7 @@ class LearningActivity : Activity() {
         position: Int
     ) {
         if (position >= pending.size) {
+            translationInProgress = false
             saveCachedSubtitles()
             renderSubtitles()
             statusText.text = "已在手机端完成 ${pending.size} 句中文翻译，并缓存到本机。"
@@ -1890,6 +1912,7 @@ class LearningActivity : Activity() {
                 translateSubtitleAt(translator, pending, position + 1)
             }
             .addOnFailureListener { error ->
+                translationInProgress = false
                 saveCachedSubtitles()
                 renderSubtitles()
                 statusText.text = "手机端翻译到第 ${position + 1} 句失败：${error.message}"
@@ -2283,18 +2306,41 @@ class LearningActivity : Activity() {
             }
             val parts = timing.split("-->")
             if (parts.size == 2 && textLines.isNotEmpty()) {
+                val (englishText, chineseText) = splitSrtSubtitleText(textLines)
                 result.add(
                     SubtitleLine(
-                        index = number.trim().toIntOrNull() ?: result.size + 1,
+                        index = number.trim().trimStart('\uFEFF').toIntOrNull() ?: result.size + 1,
                         startMs = parseTimestamp(parts[0].trim()),
                         endMs = parseTimestamp(parts[1].trim()),
-                        englishText = textLines.first(),
-                        chineseText = textLines.drop(1).joinToString("\n").ifBlank { null }
+                        englishText = englishText,
+                        chineseText = chineseText
                     )
                 )
             }
         }
         return result
+    }
+
+    private fun splitSrtSubtitleText(textLines: List<String>): Pair<String, String?> {
+        val cleaned = textLines.map { it.trim() }.filter { it.isNotBlank() }
+        if (cleaned.isEmpty()) return "" to null
+        val firstChineseLine = cleaned.indexOfFirst { containsCjk(it) }
+        return if (firstChineseLine > 0) {
+            cleaned.take(firstChineseLine).joinToString(" ").trim() to
+                cleaned.drop(firstChineseLine).joinToString("\n").trim().ifBlank { null }
+        } else if (firstChineseLine == 0) {
+            cleaned.first() to cleaned.drop(1).joinToString("\n").trim().ifBlank { null }
+        } else {
+            cleaned.joinToString(" ").trim() to null
+        }
+    }
+
+    private fun containsCjk(text: String): Boolean {
+        return text.any { char ->
+            char in '\u3400'..'\u4DBF' ||
+                char in '\u4E00'..'\u9FFF' ||
+                char in '\uF900'..'\uFAFF'
+        }
     }
 
     private fun parseTranscriptJson(json: String): List<SubtitleLine> {
