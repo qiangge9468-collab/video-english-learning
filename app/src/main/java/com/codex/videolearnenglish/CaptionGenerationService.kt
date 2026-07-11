@@ -7,9 +7,11 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.net.Uri
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -19,6 +21,7 @@ import java.security.MessageDigest
 
 class CaptionGenerationService : Service() {
     private lateinit var onDeviceWhisper: OnDeviceWhisperTranscriber
+    private var wakeLock: PowerManager.WakeLock? = null
     @Volatile private var running = false
 
     override fun onCreate() {
@@ -40,7 +43,8 @@ class CaptionGenerationService : Service() {
         }
         val videoUri = Uri.parse(uriText)
         running = true
-        startForeground(NOTIFICATION_ID, notification("正在检查 Whisper 服务连接..."))
+        startCaptionForeground("正在检查 Whisper 服务连接...")
+        acquireWakeLock()
         Thread {
             var success = false
             var audioForUpload: RemoteAudioFile? = null
@@ -87,14 +91,20 @@ class CaptionGenerationService : Service() {
                 sendError(message)
         } finally {
             running = false
+            releaseWakeLock()
             stopForegroundCompat()
             stopSelf(startId)
         }
         }.start()
-        return START_NOT_STICKY
+        return START_REDELIVER_INTENT
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
+
+    override fun onDestroy() {
+        releaseWakeLock()
+        super.onDestroy()
+    }
 
     private fun progress(message: String) {
         updateNotification(message)
@@ -351,6 +361,15 @@ class CaptionGenerationService : Service() {
         getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification(message))
     }
 
+    private fun startCaptionForeground(message: String) {
+        val item = notification(message)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(NOTIFICATION_ID, item, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+        } else {
+            startForeground(NOTIFICATION_ID, item)
+        }
+    }
+
     private fun notification(message: String): Notification {
         val pendingIntent = PendingIntent.getActivity(
             this,
@@ -370,8 +389,30 @@ class CaptionGenerationService : Service() {
             .setContentText(message)
             .setStyle(Notification.BigTextStyle().bigText(message))
             .setOngoing(true)
+            .setOnlyAlertOnce(true)
             .setContentIntent(pendingIntent)
             .build()
+    }
+
+    private fun acquireWakeLock() {
+        if (wakeLock?.isHeld == true) return
+        val powerManager = getSystemService(PowerManager::class.java)
+        wakeLock = powerManager.newWakeLock(
+            PowerManager.PARTIAL_WAKE_LOCK,
+            "$packageName:CaptionGeneration"
+        ).apply {
+            setReferenceCounted(false)
+            acquire(3 * 60 * 60 * 1000L)
+        }
+    }
+
+    private fun releaseWakeLock() {
+        wakeLock?.let { lock ->
+            if (lock.isHeld) {
+                runCatching { lock.release() }
+            }
+        }
+        wakeLock = null
     }
 
     private fun stopForegroundCompat() {

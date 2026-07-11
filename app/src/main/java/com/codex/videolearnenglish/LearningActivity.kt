@@ -164,8 +164,7 @@ class LearningActivity : Activity() {
                     if (playingWordbookExample) {
                         player.pause()
                     } else if (loopSentence) {
-                        seekTo(startMs(line))
-                        player.start()
+                        seekTo(startMs(line), playWhenReady = true)
                     } else {
                         player.pause()
                     }
@@ -2260,7 +2259,7 @@ class LearningActivity : Activity() {
             player.pause()
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            player.seekTo(safePosition.toLong(), MediaPlayer.SEEK_CLOSEST_SYNC)
+            player.seekTo(safePosition.toLong(), MediaPlayer.SEEK_CLOSEST)
         } else {
             @Suppress("DEPRECATION")
             player.seekTo(safePosition)
