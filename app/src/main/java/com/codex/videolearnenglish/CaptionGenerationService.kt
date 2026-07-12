@@ -12,12 +12,19 @@ import android.net.Uri
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
+import com.google.mlkit.common.model.DownloadConditions
+import com.google.mlkit.nl.translate.TranslateLanguage
+import com.google.mlkit.nl.translate.Translation
+import com.google.mlkit.nl.translate.TranslatorOptions
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 import java.security.MessageDigest
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 
 class CaptionGenerationService : Service() {
     private lateinit var onDeviceWhisper: OnDeviceWhisperTranscriber
@@ -33,7 +40,8 @@ class CaptionGenerationService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val uriText = intent?.getStringExtra(EXTRA_VIDEO_URI)
         val serviceUrl = intent?.getStringExtra(EXTRA_SERVICE_URL).orEmpty()
-        if (uriText.isNullOrBlank() || serviceUrl.isBlank()) {
+        val serviceUrls = serviceUrlCandidates(intent, serviceUrl)
+        if (uriText.isNullOrBlank() || serviceUrls.isEmpty()) {
             stopSelf(startId)
             return START_NOT_STICKY
         }
@@ -42,14 +50,28 @@ class CaptionGenerationService : Service() {
             return START_NOT_STICKY
         }
         val videoUri = Uri.parse(uriText)
+        val taskKind = intent?.getStringExtra(EXTRA_TASK_KIND).orEmpty().ifBlank { TASK_GENERATE }
         running = true
-        startCaptionForeground("正在检查 Whisper 服务连接...")
+        startCaptionForeground(if (taskKind == TASK_GENERATE) "正在检查 Whisper 服务连接..." else "正在准备后台翻译...")
         acquireWakeLock()
         Thread {
             var success = false
             var audioForUpload: RemoteAudioFile? = null
             try {
-                ensureWhisperServiceReachable(serviceUrl)
+                if (taskKind == TASK_TRANSLATE_REMOTE || taskKind == TASK_TRANSLATE_PHONE) {
+                    val count = translateCachedSubtitles(videoUri, serviceUrls, taskKind)
+                    success = count > 0
+                    if (success) {
+                        val label = if (taskKind == TASK_TRANSLATE_REMOTE) "电脑端" else "手机端"
+                        progress("已用${label}完成 $count 句中文翻译。")
+                        sendTranslationDone(videoUri.toString(), count, label)
+                    } else {
+                        throw IllegalStateException("没有可翻译的英文字幕。")
+                    }
+                    return@Thread
+                }
+
+                val selectedServiceUrl = selectReachableServiceUrl(serviceUrls)
                 progress("Whisper 服务已连接，正在从视频中提取音频...")
                 val audio = onDeviceWhisper.extractAudioForRemoteUpload(videoUri) { percent ->
                     val bounded = percent.coerceIn(0, 100)
@@ -63,12 +85,12 @@ class CaptionGenerationService : Service() {
                 audioForUpload = audio
                 progress("音频已准备：${formatMs(audio.durationMs)}，${formatBytes(audio.file.length())}，正在上传到 Whisper 服务...")
                 val json = try {
-                    val jobId = createTranscriptJobWithRetry(serviceUrl, audio)
-                    pollTranscriptJob(serviceUrl, jobId)
+                    val jobId = createTranscriptJobWithRetry(selectedServiceUrl, audio)
+                    pollTranscriptJob(selectedServiceUrl, jobId)
                 } catch (error: Exception) {
                     if (error.message.orEmpty().contains("HTTP 404")) {
                         progress("服务端不支持进度任务接口，改用同步生成字幕...")
-                        requestTranscriptSync(serviceUrl, audio)
+                        requestTranscriptSync(selectedServiceUrl, audio)
                     } else {
                         throw error
                     }
@@ -124,8 +146,110 @@ class CaptionGenerationService : Service() {
         )
     }
 
+    private fun sendTranslationDone(uri: String, count: Int, sourceLabel: String) {
+        sendBroadcast(
+            Intent(ACTION_TRANSLATION_DONE)
+                .setPackage(packageName)
+                .putExtra(EXTRA_VIDEO_URI, uri)
+                .putExtra(EXTRA_COUNT, count)
+                .putExtra(EXTRA_MESSAGE, sourceLabel)
+        )
+    }
+
     private fun sendError(message: String) {
         sendBroadcast(Intent(ACTION_ERROR).setPackage(packageName).putExtra(EXTRA_MESSAGE, message))
+    }
+
+    private fun serviceUrlCandidates(intent: Intent?, primaryUrl: String): List<String> {
+        val ordered = linkedSetOf<String>()
+        val raw = intent?.getStringExtra(EXTRA_SERVICE_URLS).orEmpty()
+        runCatching {
+            val array = JSONArray(raw)
+            for (i in 0 until array.length()) {
+                val url = array.optString(i).trim()
+                if (url.isNotBlank()) ordered += url
+            }
+        }
+        if (primaryUrl.isNotBlank()) ordered += primaryUrl
+        val saved = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+            .getString(SERVICE_URL_CANDIDATES_KEY, null)
+            .orEmpty()
+        runCatching {
+            val array = JSONArray(saved)
+            for (i in 0 until array.length()) {
+                val url = array.optString(i).trim()
+                if (url.isNotBlank()) ordered += url
+            }
+        }
+        return ordered.toList()
+    }
+
+    private fun selectReachableServiceUrl(candidates: List<String>): String {
+        val expanded = linkedSetOf<String>()
+        candidates.forEach { candidate ->
+            if (candidate.isNotBlank()) expanded += candidate
+            runCatching {
+                val configured = configuredServiceUrls(candidate)
+                if (configured.isNotEmpty()) {
+                    saveServiceUrlCandidates(configured)
+                    expanded.addAll(configured)
+                }
+            }
+        }
+        val errors = mutableListOf<String>()
+        for (url in expanded) {
+            runCatching {
+                requestJobJson(URL(pingUrl(url)))
+            }.onSuccess {
+                getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+                    .edit()
+                    .putString(SERVICE_URL_KEY, url)
+                    .apply()
+                progress("已选择 Whisper 服务：${serviceLabel(url)}")
+                return url
+            }.onFailure { error ->
+                errors += "${serviceLabel(url)}: ${error.message}"
+            }
+        }
+        error("所有 Whisper 地址都连接失败。${errors.takeLast(3).joinToString("；")}")
+    }
+
+    private fun configuredServiceUrls(seedUrl: String): List<String> {
+        val json = requestJobJson(URL(configUrl(seedUrl)))
+        val item = JSONObject(json)
+        val array = item.optJSONArray("transcribe_urls") ?: return emptyList()
+        return (0 until array.length()).mapNotNull { index ->
+            array.optString(index).trim().takeIf { it.isNotBlank() }
+        }
+    }
+
+    private fun saveServiceUrlCandidates(urls: List<String>) {
+        val cleaned = urls.map { it.trim() }.filter { it.isNotBlank() }.distinct()
+        if (cleaned.isEmpty()) return
+        getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+            .edit()
+            .putString(SERVICE_URL_CANDIDATES_KEY, JSONArray(cleaned).toString())
+            .apply()
+    }
+
+    private fun configUrl(serviceUrl: String): String {
+        val base = serviceUrl.substringBefore("?").removeSuffix("/")
+        val root = when {
+            base.endsWith("/transcribe") -> base.removeSuffix("/transcribe")
+            base.endsWith("/jobs") -> base.removeSuffix("/jobs")
+            base.endsWith("/translate") -> base.removeSuffix("/translate")
+            else -> base
+        }
+        return "$root/config"
+    }
+
+    private fun serviceLabel(url: String): String {
+        return when {
+            url.contains("127.0.0.1") -> "USB"
+            url.contains("10.0.2.2") -> "模拟器"
+            url.startsWith("https://") -> "公网"
+            else -> "局域网"
+        }
     }
 
     private fun ensureWhisperServiceReachable(serviceUrl: String) {
@@ -287,6 +411,18 @@ class CaptionGenerationService : Service() {
         return if (query.isBlank()) url else "$url?$query"
     }
 
+    private fun translateUrl(serviceUrl: String): String {
+        val base = serviceUrl.substringBefore("?").removeSuffix("/")
+        val query = serviceUrl.substringAfter("?", "")
+        val root = when {
+            base.endsWith("/translate") -> base
+            base.endsWith("/transcribe") -> base.removeSuffix("/transcribe") + "/translate"
+            base.endsWith("/jobs") -> base.removeSuffix("/jobs") + "/translate"
+            else -> "$base/translate"
+        }
+        return if (query.isBlank()) root else "$root?$query"
+    }
+
     private fun saveCachedSubtitles(uri: Uri, transcriptJson: String): Int {
         val transcript = JSONArray(transcriptJson)
         val cache = JSONArray()
@@ -302,12 +438,118 @@ class CaptionGenerationService : Service() {
                 put("endMs", (end * 1000).toInt())
                 put("englishText", text)
                 put("chineseText", item.optString("translation").takeIf { it.isNotBlank() } ?: JSONObject.NULL)
+                put("translationSource", if (item.optString("translation").isNotBlank()) TRANSLATION_SOURCE_COMPUTER else JSONObject.NULL)
             })
         }
         if (cache.length() > 0) {
             subtitleCacheFile(uri).writeText(cache.toString(), Charsets.UTF_8)
         }
         return cache.length()
+    }
+
+    private fun translateCachedSubtitles(uri: Uri, serviceUrls: List<String>, taskKind: String): Int {
+        val file = subtitleCacheFile(uri)
+        if (!file.exists()) error("这个视频还没有缓存字幕，请先生成或导入英文字幕。")
+        val array = JSONArray(file.readText(Charsets.UTF_8))
+        val indices = mutableListOf<Int>()
+        val texts = mutableListOf<String>()
+        for (i in 0 until array.length()) {
+            val item = array.optJSONObject(i) ?: continue
+            val english = item.optString("englishText").trim()
+            if (english.isNotBlank()) {
+                indices += i
+                texts += english
+            }
+        }
+        if (texts.isEmpty()) return 0
+        val translations = if (taskKind == TASK_TRANSLATE_REMOTE) {
+            val selectedServiceUrl = selectReachableServiceUrl(serviceUrls)
+            progress("正在请求电脑端翻译 ${texts.size} 句字幕...")
+            requestRemoteTranslations(selectedServiceUrl, texts)
+        } else {
+            progress("正在准备手机端翻译模型...")
+            requestPhoneTranslations(texts)
+        }
+        if (translations.size != texts.size) error("翻译结果数量不一致：${translations.size}/${texts.size}")
+        val source = if (taskKind == TASK_TRANSLATE_REMOTE) TRANSLATION_SOURCE_COMPUTER else TRANSLATION_SOURCE_PHONE
+        var updated = 0
+        indices.forEachIndexed { position, itemIndex ->
+            val translated = translations[position].trim()
+            if (translated.isNotBlank()) {
+                val item = array.getJSONObject(itemIndex)
+                item.put("chineseText", translated)
+                item.put("translationSource", source)
+                updated += 1
+            }
+            if (position % 5 == 0 || position == indices.lastIndex) {
+                val label = if (taskKind == TASK_TRANSLATE_REMOTE) "电脑端" else "手机端"
+                progress("${label}翻译中：${position + 1}/${indices.size}")
+            }
+        }
+        file.writeText(array.toString(), Charsets.UTF_8)
+        return updated
+    }
+
+    private fun requestRemoteTranslations(serviceUrl: String, texts: List<String>): List<String> {
+        val payload = JSONObject().apply {
+            val array = JSONArray()
+            texts.forEach { array.put(it) }
+            put("texts", array)
+        }.toString().toByteArray(Charsets.UTF_8)
+        val connection = (URL(translateUrl(serviceUrl)).openConnection() as HttpURLConnection).apply {
+            requestMethod = "POST"
+            connectTimeout = 15_000
+            readTimeout = 10 * 60 * 1000
+            doOutput = true
+            setRequestProperty("Content-Type", "application/json; charset=utf-8")
+            setRequestProperty("Connection", "close")
+            setFixedLengthStreamingMode(payload.size)
+        }
+        connection.outputStream.use { it.write(payload) }
+        val json = requestJobJson(connection)
+        val array = JSONObject(json).optJSONArray("translations")
+            ?: error("电脑端没有返回 translations：$json")
+        return (0 until array.length()).map { array.optString(it) }
+    }
+
+    private fun requestPhoneTranslations(texts: List<String>): List<String> {
+        val options = TranslatorOptions.Builder()
+            .setSourceLanguage(TranslateLanguage.ENGLISH)
+            .setTargetLanguage(TranslateLanguage.CHINESE)
+            .build()
+        val translator = Translation.getClient(options)
+        val conditions = DownloadConditions.Builder().build()
+        try {
+            awaitMlKitTask<Void>("手机端翻译模型准备失败") {
+                translator.downloadModelIfNeeded(conditions)
+            }
+            return texts.mapIndexed { index, text ->
+                progress("手机端翻译中：${index + 1}/${texts.size}")
+                awaitMlKitTask<String>("手机端翻译失败") {
+                    translator.translate(text)
+                }.orEmpty().trim()
+            }
+        } finally {
+            translator.close()
+        }
+    }
+
+    private fun <T> awaitMlKitTask(label: String, starter: () -> com.google.android.gms.tasks.Task<T>): T? {
+        val latch = CountDownLatch(1)
+        val result = AtomicReference<T>()
+        val error = AtomicReference<Exception>()
+        starter()
+            .addOnSuccessListener { value ->
+                result.set(value)
+                latch.countDown()
+            }
+            .addOnFailureListener { failure ->
+                error.set(failure)
+                latch.countDown()
+            }
+        if (!latch.await(10, TimeUnit.MINUTES)) error("$label：等待超时")
+        error.get()?.let { throw IllegalStateException("$label：${it.message}", it) }
+        return result.get()
     }
 
     private fun subtitleCacheFile(uri: Uri): File {
@@ -427,13 +669,24 @@ class CaptionGenerationService : Service() {
     companion object {
         const val ACTION_PROGRESS = "com.codex.videolearnenglish.CAPTION_PROGRESS"
         const val ACTION_DONE = "com.codex.videolearnenglish.CAPTION_DONE"
+        const val ACTION_TRANSLATION_DONE = "com.codex.videolearnenglish.TRANSLATION_DONE"
         const val ACTION_ERROR = "com.codex.videolearnenglish.CAPTION_ERROR"
         const val EXTRA_VIDEO_URI = "video_uri"
         const val EXTRA_SERVICE_URL = "service_url"
+        const val EXTRA_SERVICE_URLS = "service_urls"
+        const val EXTRA_TASK_KIND = "task_kind"
         const val EXTRA_MESSAGE = "message"
         const val EXTRA_COUNT = "count"
+        const val TASK_GENERATE = "generate"
+        const val TASK_TRANSLATE_REMOTE = "translate_remote"
+        const val TASK_TRANSLATE_PHONE = "translate_phone"
+        const val TRANSLATION_SOURCE_COMPUTER = "computer"
+        const val TRANSLATION_SOURCE_PHONE = "phone"
         private const val CHANNEL_ID = "caption_generation"
         private const val NOTIFICATION_ID = 42
         private const val SUBTITLE_CACHE_DIR = "subtitles_cache"
+        private const val PREFS_NAME = "video_english_learning"
+        private const val SERVICE_URL_KEY = "whisper_service_url"
+        private const val SERVICE_URL_CANDIDATES_KEY = "whisper_service_url_candidates"
     }
 }

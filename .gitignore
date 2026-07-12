@@ -24,6 +24,7 @@ local.properties
 # Python helper cache
 __pycache__/
 *.pyc
+tools/runtime_service_config.json
 
 # On-device Whisper models are too large for Git.
 models/

@@ -24,6 +24,10 @@ AUTH_TOKEN = os.environ.get("WHISPER_AUTH_TOKEN", "").strip()
 TRANSLATION_PROVIDER = os.environ.get("TRANSLATION_PROVIDER", "auto").strip().lower()
 TRANSLATION_MODEL = os.environ.get("TRANSLATION_MODEL", "Helsinki-NLP/opus-mt-en-zh")
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+RUNTIME_CONFIG_PATH = os.environ.get(
+    "WHISPER_RUNTIME_CONFIG",
+    os.path.join(PROJECT_ROOT, "tools", "runtime_service_config.json"),
+)
 MODELS_DIR = os.path.join(PROJECT_ROOT, "models")
 LOCAL_EN_SMALL_MODEL_DIR = os.path.join(MODELS_DIR, "faster-whisper-small")
 LOCAL_EN_MEDIUM_MODEL_DIR = os.path.join(MODELS_DIR, "faster-whisper-medium")
@@ -42,6 +46,10 @@ class TranscribeHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         parsed = urlparse(self.path)
+        if parsed.path == "/config":
+            self.send_json(service_config())
+            return
+
         if parsed.path == "/ping":
             if not self.authorized(parsed):
                 self.send_json({"error": "unauthorized"}, status=401)
@@ -87,6 +95,13 @@ class TranscribeHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         parsed = urlparse(self.path)
+        if parsed.path == "/translate":
+            if not self.authorized(parsed):
+                self.send_json({"error": "unauthorized"}, status=401)
+                return
+            self.translate_and_send()
+            return
+
         if parsed.path not in ("/transcribe", "/jobs"):
             self.send_json({"error": "not found"}, status=404)
             return
@@ -122,6 +137,26 @@ class TranscribeHandler(BaseHTTPRequestHandler):
                 os.remove(video_path)
             except OSError:
                 pass
+
+    def translate_and_send(self):
+        content_length = int(self.headers.get("Content-Length", "0") or "0")
+        if content_length <= 0:
+            self.send_json({"error": "empty request"}, status=400)
+            return
+        if content_length > 10 * 1024 * 1024:
+            self.send_json({"error": "request is too large"}, status=413)
+            return
+        try:
+            body = self.rfile.read(content_length).decode("utf-8-sig")
+            payload = json.loads(body)
+            texts = payload.get("texts", [])
+            if not isinstance(texts, list):
+                raise ValueError("texts must be a list")
+            clean_texts = [str(text).strip() for text in texts]
+            translations = translate_texts(clean_texts)
+            self.send_json({"translations": translations})
+        except Exception as exc:
+            self.send_json({"error": f"translation failed: {exc}"}, status=500)
 
     def authorized(self, parsed):
         if not AUTH_TOKEN:
@@ -179,6 +214,29 @@ def guess_extension(content_type):
     if "wav" in content_type:
         return ".wav"
     return ".mp4"
+
+
+def service_config():
+    config = {
+        "token_required": bool(AUTH_TOKEN),
+        "transcribe_urls": [],
+    }
+    try:
+        with open(RUNTIME_CONFIG_PATH, "r", encoding="utf-8-sig") as handle:
+            saved = json.load(handle)
+        if isinstance(saved, dict):
+            urls = saved.get("transcribe_urls", [])
+            if isinstance(urls, list):
+                config["transcribe_urls"] = [str(url).strip() for url in urls if str(url).strip()]
+            if saved.get("public_url"):
+                config["public_url"] = str(saved["public_url"])
+            if saved.get("lan_urls"):
+                config["lan_urls"] = saved["lan_urls"]
+    except FileNotFoundError:
+        pass
+    except Exception as exc:
+        config["warning"] = f"could not read runtime config: {exc}"
+    return config
 
 
 def write_temp_upload(source, suffix, content_length):
@@ -477,28 +535,42 @@ def translate_segments(segments, language="en"):
         return segments
 
     try:
-        translator = get_translator()
+        translations = translate_texts([segment["text"] for segment in segments])
     except Exception as exc:
-        print(f"Could not load translation model: {exc}. Returning English captions only.")
+        print(f"Translation failed: {exc}. Returning English captions only.")
         return segments
-
-    if translator is None:
-        print("No local English-to-Chinese translator is available. Returning English captions only.")
+    if len(translations) != len(segments):
         return segments
 
     translated = []
-    texts = [segment["text"] for segment in segments]
+    for segment, translation in zip(segments, translations):
+        item = dict(segment)
+        item["translation"] = translation
+        translated.append(item)
+    return translated
+
+
+def translate_texts(texts):
+    if not texts or TRANSLATION_PROVIDER in ("", "none", "off"):
+        return ["" for _ in texts]
+
+    try:
+        translator = get_translator()
+    except Exception as exc:
+        raise RuntimeError(f"could not load translation model: {exc}") from exc
+
+    if translator is None:
+        raise RuntimeError("no local English-to-Chinese translator is available")
+
+    translated = [""] * len(texts)
     for start in range(0, len(texts), TRANSLATION_BATCH_SIZE):
         batch = texts[start : start + TRANSLATION_BATCH_SIZE]
         try:
             translations = translator(batch)
         except Exception as exc:
-            print(f"Translation failed: {exc}. Returning English captions only.")
-            return segments
+            raise RuntimeError(f"translation failed: {exc}") from exc
         for offset, translation in enumerate(translations):
-            segment = dict(segments[start + offset])
-            segment["translation"] = translation
-            translated.append(segment)
+            translated[start + offset] = translation
     return translated
 
 

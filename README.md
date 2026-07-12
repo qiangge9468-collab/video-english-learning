@@ -9,7 +9,7 @@
 - 导入手机里的本地视频文件。
 - 导入已有 SRT 字幕。
 - 从视频中抽取 16 kHz mono WAV 音频并上传到电脑 Whisper 服务。
-- 电脑端使用 `faster-whisper` 生成英文字幕，可同时生成中文翻译。
+- 电脑端使用 `faster-whisper` 生成英文字幕，并可通过电脑端翻译接口补全中文翻译。
 - 支持 USB 调试、本地局域网或 Cloudflare Tunnel 远程连接电脑服务。
 - 字幕按视频 URI 缓存在 App 私有目录，再次打开同一视频会自动加载。
 - 支持英文、中文、双语三种字幕显示模式。
@@ -90,7 +90,8 @@ This is the English subtitle.
 2. 把 WAV 音频上传到电脑 Whisper 服务。
 3. 显示上传和识别进度。
 4. 下载识别结果。
-5. 保存到本机字幕缓存。
+5. 如果电脑端翻译可用，会继续补全中文字幕。
+6. 保存到本机字幕缓存。
 
 第一次使用前需要先启动电脑端服务，见下方“电脑端 Whisper 服务”。
 
@@ -105,6 +106,7 @@ This is the English subtitle.
 | 上句/下句 | 切换当前复读句子 |
 | 翻译关/翻译开 | 当前句子是否显示中文翻译 |
 | 英文/双语/中文 | 切换字幕列表显示模式 |
+| 长按英文/双语/中文 | 查看当前中文翻译来源，并选择用电脑端或手机端重新翻译 |
 | Loop On/Loop Off | 开关单句循环 |
 | 复读 | 从当前句开头重新播放 |
 | 生成 | 自动生成字幕 |
@@ -138,7 +140,16 @@ This is the English subtitle.
 
 手机自动生成字幕时，需要电脑运行一个 Whisper HTTP 服务。手机负责从视频里抽取音频并上传，电脑负责识别字幕并把结果返回给手机。
 
+同一个电脑端服务也负责更高质量的英译中翻译。App 里点“生成”后，如果已有英文字幕但没有中文翻译，或者切换到“双语/中文”时发现翻译为空，App 会优先请求电脑端 `/translate` 接口；电脑端不可用时才退回手机端 ML Kit 翻译。
+
 最重要的一点：手机端“长按生成”可以打开服务地址设置页。每次换网络环境时，先长按“生成”，把服务地址改成对应环境的地址，点“测试”成功后，再返回点“生成”。
+
+如果已经有英文字幕但中文翻译不准，可以长按“英文/双语/中文”按钮。弹窗会显示当前中文字幕来自电脑端、手机端、导入字幕还是旧缓存，并提供两个重新翻译入口：
+
+- 电脑端重翻：优先推荐。手机把已有英文字幕发给电脑端 `/translate`，电脑用 `transformers` 模型翻译，完成后自动写回本地字幕缓存。
+- 手机端重翻：备用方案。手机使用 ML Kit 英译中模型翻译，首次使用需要联网下载模型，准确性通常弱于电脑端。
+
+重新翻译会覆盖当前中文字幕，但会保留英文字幕和时间轴。翻译任务和生成字幕一样在前台服务中运行，切到后台或锁屏后仍会继续，前提是系统没有强行限制 App 后台网络。
 
 ### 环境要求
 
@@ -153,6 +164,8 @@ This is the English subtitle.
 ```powershell
 python -m pip install -r requirements.txt
 ```
+
+如果想使用电脑端翻译，也需要安装 `requirements.txt` 里的翻译依赖：`argostranslate`、`transformers`、`sentencepiece`、`torch`。依赖已写在同一个文件里，通常执行上面的命令即可。
 
 如果还没有 FFmpeg，Windows 可以用 winget 安装：
 
@@ -192,26 +205,62 @@ models/faster-whisper-medium（Multilingual model）/
 cd C:\tmp\video-english-learning-remote
 ```
 
-然后根据手机和电脑的连接环境选择一个脚本。
+推荐只运行这一行：
 
-| 使用环境 | 电脑端脚本 | App 服务地址 |
-| --- | --- | --- |
-| Android 模拟器 | `tools/start_remote_whisper_service.ps1` | `http://10.0.2.2:8765/transcribe` |
-| 真机 USB 调试 | `tools/start_remote_whisper_service.ps1` | `http://127.0.0.1:8765/transcribe` |
-| 手机和电脑同一 Wi-Fi | `tools/start_lan_whisper_service.ps1` | 服务窗口打印的 `http://电脑IP:8765/transcribe` |
-| 手机用流量、异地、不同 Wi-Fi | `tools/start_public_whisper_service.ps1` | Cloudflare 打印的 `https://xxxxx.trycloudflare.com/transcribe?token=...` |
+```powershell
+powershell -ExecutionPolicy Bypass -File tools/start_video_english_service.ps1
+```
 
-### 第二步：手机端设置服务地址
+这个一键脚本会自动做这些事：
+
+- 启动电脑端 Whisper 字幕服务。
+- 默认启用电脑端英译中翻译：`transformers` + `Helsinki-NLP/opus-mt-en-zh`。
+- 自动给已连接的 Android 真机配置 `adb reverse`，USB 连接时优先走 USB。
+- 打印局域网地址，手机和电脑在同一 Wi-Fi 时可自动切到局域网。
+- 如果电脑已安装 `cloudflared`，会自动创建 Cloudflare Tunnel，手机用流量或不在同一局域网时也可以继续连接。
+- 生成一个一次性 token，并把 USB、局域网、公网候选地址写入本机运行时配置。App 能从电脑端读取这些候选地址，按 USB -> 局域网 -> 公网的顺序自动选择可用连接。
+
+PowerShell 窗口必须保持打开。关闭窗口后，电脑端字幕和翻译服务都会停止；Cloudflare 临时公网地址也会失效。
+
+### 第二步：手机端生成字幕
 
 1. 打开 App，先点“导入”选择视频。
-2. 长按“生成”，进入 Whisper 服务设置页。
-3. 填入对应环境的服务地址。
-4. 点“测试”。看到连接正常后返回。
-5. 点“生成”，App 会抽取音频、上传到电脑、等待 Whisper 识别并保存字幕。
+2. 电脑端一键脚本保持运行。
+3. 点“生成”。App 会自动尝试 USB、局域网和公网候选地址，连上后抽取音频、上传到电脑、等待 Whisper 识别并保存字幕。
 
-生成过程中可以短暂切到后台。App 会尽量用前台服务继续上传和轮询任务，但不要在系统后台清理里强行结束 App，也不要关闭电脑端 PowerShell 服务窗口。
+通常不需要再长按“生成”手动填写地址。只有换了电脑、清除了 App 数据，或公网 Cloudflare 地址变了但手机还没通过 USB/局域网同步到新配置时，才需要长按“生成”手动填写电脑端窗口打印的完整地址。
+
+生成和翻译过程中可以短暂切到后台或锁屏。App 会用前台服务和唤醒锁继续上传、轮询任务结果和保存字幕，但不要在系统后台清理里强行结束 App，也不要关闭电脑端 PowerShell 服务窗口。如果手机系统限制后台网络，建议在系统电池设置里允许“看视频学英语”后台运行。
+
+### 第三步：电脑端翻译
+
+电脑端翻译不需要在手机里填写第二个地址。App 会根据选中的 `/transcribe` 地址自动推导 `/translate` 地址，例如：
+
+```text
+http://127.0.0.1:8765/transcribe              -> http://127.0.0.1:8765/translate
+http://192.168.0.133:8765/transcribe          -> http://192.168.0.133:8765/translate
+https://xxxxx.trycloudflare.com/transcribe?token=abc
+                                               -> https://xxxxx.trycloudflare.com/translate?token=abc
+```
+
+一键脚本默认已经使用下面的翻译设置：
+
+```powershell
+$env:TRANSLATION_PROVIDER="transformers"
+$env:TRANSLATION_MODEL="Helsinki-NLP/opus-mt-en-zh"
+```
+
+如果你要换别的翻译模型，可以在运行一键脚本前自己设置这两个环境变量。注意这里要使用英文半角引号 `"..."`，不要使用中文弯引号 `“...”`。如果翻译模型第一次运行，电脑可能需要联网下载模型，耗时会比较久。
 
 ## 不同环境的连接方法
+
+日常使用优先用一键脚本：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools/start_video_english_service.ps1
+```
+
+下面的 A/B/C/D/E 是高级排障和手动模式。一般不需要按环境分别运行这些旧脚本。
 
 ### 方式 A：Android 模拟器
 
@@ -365,6 +414,32 @@ https://twisted-priced-elevation-volt.trycloudflare.com/transcribe?token=8f3a...
 
 App 里长按“生成”，填这个完整 HTTPS 地址，点“测试”，成功后再点“生成”。手机可以关 Wi-Fi 只用 4G/5G 测试。
 
+如果手机没有 USB 连接电脑，也不在同一个局域网，只用手机流量直接点“生成”，App 没办法自动知道电脑刚生成的 Cloudflare 临时域名。这种情况下必须先长按“生成”，手动填写电脑窗口打印的完整公网地址，例如 `https://真实域名.trycloudflare.com/transcribe?token=真实token`。如果你先用 USB 或局域网连通过一次，一键脚本会把新的公网候选地址同步给 App，之后拔掉 USB 或切到流量时才可能自动回退到公网地址。
+
+如果脚本提示类似下面这样：
+
+```text
+Port 8766 is already in use.
+Do not expose an old or unauthenticated Whisper service to the public internet.
+```
+
+说明这一轮服务没有真正启动，也没有生成新的可用公网地址。此时不要把窗口上方刚打印的 token 填进手机。你需要二选一：
+
+1. 关闭旧的 Whisper/Cloudflare PowerShell 窗口，再重新运行脚本。
+2. 换一个端口启动，例如：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools/start_public_whisper_service.ps1 -Port 8767
+```
+
+只有当你看到 Cloudflare 打印了真实域名，例如 `https://thriller-sacred-divided-appraisal.trycloudflare.com`，才把它和同一窗口里的 `Auth token` 组合成手机端地址：
+
+```text
+https://thriller-sacred-divided-appraisal.trycloudflare.com/transcribe?token=窗口里打印的AuthToken
+```
+
+不要填写 `https://xxxxx.trycloudflare.com/...`，也不要填写 `http://127.0.0.1:8766/...`。前者只是占位符，后者在手机流量环境下指向手机自己，不是电脑。
+
 公网自检脚本：
 
 ```powershell
@@ -375,6 +450,7 @@ powershell -ExecutionPolicy Bypass -File tools/test_remote_whisper_service.ps1 -
 
 - PowerShell 窗口必须一直开着。关闭窗口后，Cloudflare 地址会失效。
 - 每次重新启动 `start_public_whisper_service.ps1`，Cloudflare 免费临时域名通常会变化，需要重新填写 App 地址。
+- 使用一键脚本 `tools/start_video_english_service.ps1` 时也是同理：USB 和局域网地址可以自动探测；纯手机流量场景必须通过已同步的运行时配置或手动填写最新 Cloudflare 公网地址。
 - 不要把没有 token 的本地服务暴露到公网。
 - `start_public_whisper_service.ps1` 会自动生成安全 token；如果环境变量里误设了“你的token”这类占位文本，脚本也会忽略并重新生成。
 
@@ -504,6 +580,7 @@ GET /ping
 GET /models?token=<WHISPER_AUTH_TOKEN>
 GET /transcribe?video=backpacking
 POST /transcribe?token=<WHISPER_AUTH_TOKEN>
+POST /translate?token=<WHISPER_AUTH_TOKEN>
 ```
 
 返回字幕格式：
@@ -519,6 +596,28 @@ POST /transcribe?token=<WHISPER_AUTH_TOKEN>
 ]
 ```
 
+`POST /translate` 用于只给已有英文字幕补中文翻译。请求体示例：
+
+```json
+{
+  "texts": [
+    "But we don't get to go straight as the crow flies.",
+    "This is the lost way around Africa."
+  ]
+}
+```
+
+返回格式：
+
+```json
+{
+  "translations": [
+    "但我们不能走直线过去。",
+    "这是绕行非洲的迷路路线。"
+  ]
+}
+```
+
 ## 仓库结构
 
 ```text
@@ -527,6 +626,7 @@ app/src/main/java/...         Kotlin 主逻辑
 app/src/main/cpp/             whisper.cpp JNI 桥接层
 app/src/main/assets/          词典和示例字幕
 tools/local_whisper_service.py 电脑端 Whisper HTTP 服务
+tools/start_video_english_service.ps1 推荐的一键启动脚本：字幕、翻译、USB、局域网、公网候选地址自动配置
 tools/start_remote_whisper_service.ps1 USB/通用启动脚本，会自动配置 adb reverse
 tools/start_lan_whisper_service.ps1    局域网启动脚本，会打印手机应填写的电脑 IP 地址
 tools/test_lan_whisper_service.ps1     局域网服务自检脚本
@@ -558,31 +658,53 @@ git submodule update --init --recursive
 - `local.properties`、`.idea/`、`.gradle/`、`app/build/` 等本机文件不会入库。
 - `models/` 和 `*.bin` 默认忽略，避免把大型模型文件提交到 Git。
 - `release/` 中的 APK 会被允许入库，便于用户直接下载安装。
-- 远程服务 token 不要写进仓库；本地 USB/局域网默认不启用 token。如果要通过公网或不可信网络访问，请使用 `tools/start_public_whisper_service.ps1` 打印的一次性 token。
+- 远程服务 token 不要写进仓库；推荐使用 `tools/start_video_english_service.ps1` 自动生成一次性 token。脚本生成的 `tools/runtime_service_config.json` 是本机运行时配置，已被 Git 忽略。
 - 该项目源码使用 MIT License。`third_party/whisper.cpp` 遵循其上游许可证。
 
 ## 常见问题
 
 ### 点“生成”后连接失败
 
-先长按“生成”，点“测试”确认服务地址可用。
+先确认电脑端只运行这一行，并保持窗口打开：
 
-- 模拟器：地址应为 `http://10.0.2.2:8765/transcribe`。
-- USB 真机：检查 `adb reverse tcp:8765 tcp:8765` 是否成功，地址应为 `http://127.0.0.1:8765/transcribe`。
-- 同一 Wi-Fi：地址应为电脑 Wi-Fi IPv4，例如 `http://192.168.0.133:8765/transcribe`，并确认 Windows 防火墙放行 Python。
-- 手机流量/异地：使用 `tools/start_public_whisper_service.ps1`，地址必须是 `https://xxxxx.trycloudflare.com/transcribe?token=...`，并保持 PowerShell 窗口打开。
+```powershell
+powershell -ExecutionPolicy Bypass -File tools/start_video_english_service.ps1
+```
+
+新版 App 会自动尝试 USB、局域网和公网候选地址。排查顺序：
+
+- USB 真机：确认手机已开启 USB 调试并允许本电脑调试；一键脚本会每隔几秒自动配置 `adb reverse`。
+- 同一 Wi-Fi：确认手机和电脑在同一个局域网，Windows 防火墙允许 Python 通信。
+- 手机流量/异地：确认电脑已安装 `cloudflared`，并且一键脚本窗口里已经打印 Cloudflare 公网地址。
+- 如果仍失败，长按“生成”，把一键脚本窗口打印的完整地址手动填进去，再点“测试”。
 
 ### 生成字幕失败，提示 `HTTP 401`
 
-这是 token 不匹配。重新看电脑端 PowerShell 窗口打印的 App 地址，把完整地址复制到 App。公网模式下一定要带 `?token=...`。
+这是 token 不匹配。新版一键脚本会自动生成 token，App 正常会从 `/config` 读取带 token 的候选地址。如果你手动填写地址，必须复制 PowerShell 窗口打印的完整地址，不能漏掉 `?token=...`。
 
 ### 生成字幕失败，提示 `Broken pipe`
 
-通常是上传过程中连接被中断。先不要关闭手机 App 和电脑 PowerShell 窗口，再点“生成”重试；App 会保留已抽取的音频缓存，下次通常可以直接重试上传。公网模式下还要确认 Cloudflare Tunnel 窗口仍在运行，且 App 里填的是当前这次新生成的域名。
+通常是上传过程中连接被中断。先不要关闭手机 App 和电脑 PowerShell 窗口，再点“生成”重试；App 会保留已抽取的音频缓存，下次通常可以直接重试上传。公网模式下还要确认一键脚本窗口仍在运行，且 Cloudflare Tunnel 没有断开。
+
+### 生成字幕失败，提示 `unexpected end of stream`
+
+多数情况下是公网 Cloudflare 地址已经失效、填了旧 tunnel、填了占位域名 `xxxxx.trycloudflare.com`，或电脑端服务窗口已经关闭。重新运行一键脚本：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools/start_video_english_service.ps1
+```
+
+等待 Cloudflare 打印真实 `https://...trycloudflare.com` 域名。App 如果曾通过 USB 或局域网连到电脑，会自动读取新公网候选地址；否则可以长按“生成”手动填完整地址：
+
+```text
+https://真实域名.trycloudflare.com/transcribe?token=同一窗口里的AuthToken
+```
+
+如果脚本提示端口已被占用，这一轮没有启动成功，需要先关闭旧窗口或换端口，例如 `-Port 8767`。
 
 ### 切到后台后生成字幕失败
 
-电脑端确实负责 Whisper 识别，但手机仍要负责上传音频和轮询任务结果。长视频的音频可能几十 MB，如果系统把 App 后台网络或前台服务杀掉，上传会中断。建议首次生成时保持 App 在前台，或在系统电池设置里允许“看视频学英语”后台运行，并允许通知权限。
+电脑端确实负责 Whisper 识别和翻译，但手机仍要负责上传音频和轮询任务结果。新版 App 会用前台服务和唤醒锁尽量支持后台、锁屏继续生成；如果仍失败，通常是系统电池策略限制了后台网络。请在系统电池设置里允许“看视频学英语”后台运行，并允许通知权限，不要在生成过程中手动清理后台或关闭电脑端服务窗口。
 
 ### 生成很慢
 
@@ -590,7 +712,14 @@ CPU 运行 Whisper 会比较慢。可以使用更小的模型，或使用 CUDA G
 
 ### 中文字幕为空
 
-服务端会优先尝试本地翻译依赖。如果没有安装 Argos Translate 或 Transformers 翻译模型，可能只返回英文字幕。App 端也集成了 ML Kit 英译中，首次使用需要联网下载翻译模型。
+App 会优先请求电脑端 `/translate` 接口补翻译。如果没有安装翻译依赖、模型第一次下载失败，或你填写的 Whisper 地址不可达，就可能只显示英文字幕。先确认电脑端服务能正常生成字幕，再确认启动前设置的翻译环境变量是否正确：
+
+```powershell
+$env:TRANSLATION_PROVIDER="transformers"
+$env:TRANSLATION_MODEL="Helsinki-NLP/opus-mt-en-zh"
+```
+
+然后重新启动对应脚本。手机端不需要额外填写翻译地址，只需要保证长按“生成”里填写的是正确的 `/transcribe` 地址。电脑端翻译不可用时，App 会尝试退回 ML Kit 英译中，首次使用需要联网下载翻译模型。
 
 ### 字幕有轻微提前或延后
 
