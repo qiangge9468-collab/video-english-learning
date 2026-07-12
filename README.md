@@ -719,7 +719,30 @@ $env:TRANSLATION_PROVIDER="transformers"
 $env:TRANSLATION_MODEL="Helsinki-NLP/opus-mt-en-zh"
 ```
 
-然后重新启动对应脚本。手机端不需要额外填写翻译地址，只需要保证长按“生成”里填写的是正确的 `/transcribe` 地址。电脑端翻译不可用时，App 会尝试退回 ML Kit 英译中，首次使用需要联网下载翻译模型。
+然后重新启动对应脚本。手机端不需要额外填写翻译地址，只需要保证长按“生成”里填写的是正确的 `/transcribe` 地址。电脑端翻译不可用时，英文字幕仍会保留；修好电脑端服务后，长按“英文/双语/中文”选择“电脑端重翻”即可重新获取中文字幕。也可以在同一个弹窗里选择“手机端重翻”，使用 ML Kit 英译中作为备用方案。
+
+如果看到下面这种错误：
+
+```text
+translation failed: could not load translation model: check_hostname requires server_hostname
+```
+
+通常是 Windows/Python 继承了不兼容的本地代理环境变量，例如把 `HTTPS_PROXY` 写成了 `https://127.0.0.1:7890`。新版 `tools/start_video_english_service.ps1` 会自动把这类本地代理修正为 `http://127.0.0.1:7890`。处理方法：
+
+1. 关闭旧的 PowerShell 服务窗口。
+2. 重新运行一键脚本：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools/start_video_english_service.ps1
+```
+
+如果仍失败，在同一个 PowerShell 里检查代理变量：
+
+```powershell
+Get-ChildItem Env:*proxy*
+```
+
+把本地 HTTP 代理写成 `http://127.0.0.1:端口`，不要写成 `https://127.0.0.1:端口`。翻译模型第一次加载需要联网下载 `Helsinki-NLP/opus-mt-en-zh`，下载成功后会缓存到电脑本地。
 
 ### 字幕有轻微提前或延后
 

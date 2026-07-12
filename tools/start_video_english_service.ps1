@@ -22,6 +22,22 @@ if (-not $env:TRANSLATION_MODEL) {
     $env:TRANSLATION_MODEL = "Helsinki-NLP/opus-mt-en-zh"
 }
 
+function Repair-LocalProxyEnv {
+    $names = @("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy")
+    foreach ($name in $names) {
+        $item = Get-Item "Env:\$name" -ErrorAction SilentlyContinue
+        if (-not $item) { continue }
+        $value = [string]$item.Value
+        if ($value -match "^https://(127\.0\.0\.1|localhost)(:\d+)?(/.*)?$") {
+            $fixed = "http://" + $value.Substring("https://".Length)
+            Set-Item "Env:\$name" $fixed
+            Write-Host "Adjusted $name for local proxy compatibility: $fixed"
+        }
+    }
+}
+
+Repair-LocalProxyEnv
+
 $token = $env:WHISPER_AUTH_TOKEN
 if (-not $NoAuth) {
     if (-not $token -or $token -eq "你的token" -or $token -match "[^A-Za-z0-9._~-]") {

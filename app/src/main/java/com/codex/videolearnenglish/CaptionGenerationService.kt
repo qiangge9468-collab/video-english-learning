@@ -105,13 +105,14 @@ class CaptionGenerationService : Service() {
                     throw IllegalStateException("没有生成字幕。")
                 }
             } catch (error: Exception) {
+                val isTranslationTask = taskKind == TASK_TRANSLATE_REMOTE || taskKind == TASK_TRANSLATE_PHONE
                 val message = buildString {
-                    append(friendlyGenerationError(error))
+                    append(if (isTranslationTask) friendlyTranslationError(error) else friendlyGenerationError(error))
                     audioForUpload?.let { append("。已保留音频缓存：").append(formatBytes(it.file.length())).append("，下次会直接重试上传。") }
                 }
-                updateNotification("生成字幕失败：$message")
-                sendError(message)
-        } finally {
+                updateNotification(if (isTranslationTask) "中文翻译失败：$message" else "生成字幕失败：$message")
+                sendError(message, taskKind)
+            } finally {
             running = false
             releaseWakeLock()
             stopForegroundCompat()
@@ -156,8 +157,13 @@ class CaptionGenerationService : Service() {
         )
     }
 
-    private fun sendError(message: String) {
-        sendBroadcast(Intent(ACTION_ERROR).setPackage(packageName).putExtra(EXTRA_MESSAGE, message))
+    private fun sendError(message: String, taskKind: String) {
+        sendBroadcast(
+            Intent(ACTION_ERROR)
+                .setPackage(packageName)
+                .putExtra(EXTRA_MESSAGE, message)
+                .putExtra(EXTRA_TASK_KIND, taskKind)
+        )
     }
 
     private fun serviceUrlCandidates(intent: Intent?, primaryUrl: String): List<String> {
@@ -578,6 +584,22 @@ class CaptionGenerationService : Service() {
                 "上传连接中断。通常是电脑端 Whisper 服务中途退出、USB reverse 断开，或局域网不稳定；请重新启动服务后重试。原始错误：$message"
             message.contains("HTTP 401") ->
                 "服务 token 不匹配。请长按“生成”检查地址里的 token 是否和服务窗口打印的一致。"
+            else -> message.ifBlank { error.javaClass.simpleName }
+        }
+    }
+
+    private fun friendlyTranslationError(error: Throwable): String {
+        val message = error.message.orEmpty()
+        return when {
+            message.contains("check_hostname requires server_hostname", ignoreCase = true) ->
+                "电脑端中文翻译模型加载失败，通常是 Windows/Python 代理配置导致 HuggingFace 模型下载异常。英文字幕已保留；请检查代理环境变量，或先在电脑端预下载翻译模型。原始错误：$message"
+            message.contains("could not load translation model", ignoreCase = true) ->
+                "电脑端中文翻译模型没有加载成功。英文字幕已保留；请确认已运行 requirements.txt 安装 transformers、sentencepiece、torch，并确认电脑能下载或已缓存 Helsinki-NLP/opus-mt-en-zh。原始错误：$message"
+            message.contains("HTTP 500") && message.contains("translation failed", ignoreCase = true) ->
+                "电脑端翻译接口报错。英文字幕已保留；请查看 PowerShell 服务窗口里的 Python 错误，修好后长按“英文/双语/中文”选择“电脑端重翻”。原始错误：$message"
+            message.contains("Failed to connect", ignoreCase = true) ||
+                message.contains("Connection refused", ignoreCase = true) ->
+                "连接不上电脑端翻译服务。英文字幕已保留；请确认一键脚本仍在运行，并长按“生成”测试服务地址。原始错误：$message"
             else -> message.ifBlank { error.javaClass.simpleName }
         }
     }

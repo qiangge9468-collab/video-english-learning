@@ -209,8 +209,17 @@ class LearningActivity : Activity() {
                 CaptionGenerationService.ACTION_ERROR -> {
                     translationInProgress = false
                     val message = intent.getStringExtra(CaptionGenerationService.EXTRA_MESSAGE).orEmpty()
-                    statusText.text = "后台任务失败：$message"
-                    Toast.makeText(this@LearningActivity, "后台任务失败：$message", Toast.LENGTH_LONG).show()
+                    val taskKind = intent.getStringExtra(CaptionGenerationService.EXTRA_TASK_KIND).orEmpty()
+                    val label = if (
+                        taskKind == CaptionGenerationService.TASK_TRANSLATE_REMOTE ||
+                        taskKind == CaptionGenerationService.TASK_TRANSLATE_PHONE
+                    ) {
+                        "中文翻译失败，英文字幕已保留"
+                    } else {
+                        "后台任务失败"
+                    }
+                    statusText.text = "$label：$message"
+                    Toast.makeText(this@LearningActivity, "$label：$message", Toast.LENGTH_LONG).show()
                 }
             }
         }
@@ -321,8 +330,9 @@ class LearningActivity : Activity() {
 
         val videoPane = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            val top = if (landscape) 18 + statusBarHeightPx() else 18
-            setPadding(18, top, 18, 12)
+            val top = 18 + statusBarHeightPx()
+            val bottom = if (landscape) 30 else 12
+            setPadding(18, top, 18, bottom)
         }
         val subtitlePane = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -378,15 +388,12 @@ class LearningActivity : Activity() {
 
         statusText = TextView(this).apply {
             text = "测试视频：https://youtu.be/LDVW1qlxdi4"
-            textSize = 14f
+            textSize = if (landscape) 12f else 14f
             setTextColor(0xFF34434A.toInt())
-            setPadding(0, 12, 0, 8)
+            setPadding(0, if (landscape) 8 else 12, 0, 6)
+            if (landscape) maxLines = 2
         }
-        if (landscape) {
-            subtitlePane.addView(statusText)
-        } else {
-            videoPane.addView(statusText)
-        }
+        videoPane.addView(statusText)
 
         transientNavRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -440,11 +447,7 @@ class LearningActivity : Activity() {
             setPadding(8, 0, 0, 0)
         }
         playbackProgressRow.addView(playbackTimeText, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-        if (landscape) {
-            subtitlePane.addView(playbackProgressRow, LinearLayout.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-        } else {
-            videoPane.addView(playbackProgressRow, LinearLayout.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-        }
+        videoPane.addView(playbackProgressRow, LinearLayout.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
 
         currentCaptionText = TextView(this).apply {
             textSize = 18f

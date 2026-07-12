@@ -12,6 +12,17 @@ VIDEO_PATHS = {
     "backpacking": r"C:\Users\ASUS\Downloads\Full Gear List for Solo Backpacking.mp4",
 }
 
+def repair_local_proxy_env():
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        value = os.environ.get(name, "")
+        if re.match(r"^https://(127\.0\.0\.1|localhost)(:\d+)?(/.*)?$", value):
+            fixed = "http://" + value[len("https://") :]
+            os.environ[name] = fixed
+            print(f"Adjusted {name} for local proxy compatibility: {fixed}")
+
+
+repair_local_proxy_env()
+
 SENTENCE_END_RE = re.compile(r"[.!?][\"')\]]*$")
 MAX_SENTENCE_SECONDS = 14.0
 MAX_SENTENCE_CHARS = 180
