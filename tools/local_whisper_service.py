@@ -6,6 +6,7 @@ import tempfile
 import threading
 import time
 import uuid
+import urllib.request
 from urllib.parse import parse_qs, urlparse
 
 VIDEO_PATHS = {
@@ -13,12 +14,19 @@ VIDEO_PATHS = {
 }
 
 def repair_local_proxy_env():
+    detected = urllib.request.getproxies()
     for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
         value = os.environ.get(name, "")
         if re.match(r"^https://(127\.0\.0\.1|localhost)(:\d+)?(/.*)?$", value):
             fixed = "http://" + value[len("https://") :]
             os.environ[name] = fixed
             print(f"Adjusted {name} for local proxy compatibility: {fixed}")
+    for scheme, value in detected.items():
+        if scheme.lower() in ("http", "https") and re.match(r"^https://(127\.0\.0\.1|localhost)(:\d+)?(/.*)?$", value):
+            fixed = "http://" + value[len("https://") :]
+            env_name = f"{scheme.upper()}_PROXY"
+            os.environ[env_name] = fixed
+            print(f"Adjusted Windows {scheme} proxy for Python compatibility via {env_name}: {fixed}")
 
 
 repair_local_proxy_env()
@@ -228,21 +236,28 @@ def guess_extension(content_type):
 
 
 def service_config():
+    current_port = int(os.environ.get("WHISPER_PORT", "8765"))
+    token_suffix = f"?token={AUTH_TOKEN}" if AUTH_TOKEN else ""
     config = {
         "token_required": bool(AUTH_TOKEN),
-        "transcribe_urls": [],
+        "transcribe_urls": [f"http://127.0.0.1:{current_port}/transcribe{token_suffix}"],
     }
     try:
         with open(RUNTIME_CONFIG_PATH, "r", encoding="utf-8-sig") as handle:
             saved = json.load(handle)
         if isinstance(saved, dict):
-            urls = saved.get("transcribe_urls", [])
-            if isinstance(urls, list):
-                config["transcribe_urls"] = [str(url).strip() for url in urls if str(url).strip()]
-            if saved.get("public_url"):
-                config["public_url"] = str(saved["public_url"])
-            if saved.get("lan_urls"):
-                config["lan_urls"] = saved["lan_urls"]
+            saved_port = int(saved.get("port", current_port))
+            if saved_port == current_port:
+                urls = saved.get("transcribe_urls", [])
+                if isinstance(urls, list):
+                    merged = config["transcribe_urls"] + [str(url).strip() for url in urls if str(url).strip()]
+                    config["transcribe_urls"] = list(dict.fromkeys(merged))
+                if saved.get("public_url"):
+                    config["public_url"] = str(saved["public_url"])
+                if saved.get("lan_urls"):
+                    config["lan_urls"] = saved["lan_urls"]
+            else:
+                config["warning"] = f"ignored runtime config for port {saved_port}; current port is {current_port}"
     except FileNotFoundError:
         pass
     except Exception as exc:

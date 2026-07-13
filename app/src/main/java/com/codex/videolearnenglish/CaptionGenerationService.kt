@@ -497,6 +497,41 @@ class CaptionGenerationService : Service() {
     }
 
     private fun requestRemoteTranslations(serviceUrl: String, texts: List<String>): List<String> {
+        val translated = mutableListOf<String>()
+        var start = 0
+        while (start < texts.size) {
+            val end = (start + REMOTE_TRANSLATION_BATCH_SIZE).coerceAtMost(texts.size)
+            progress("电脑端翻译中：${start + 1}-$end/${texts.size}（首次加载模型可能较久）")
+            translated += requestRemoteTranslationBatchWithRetry(serviceUrl, texts.subList(start, end), start + 1, end, texts.size)
+            progress("电脑端翻译中：$end/${texts.size}")
+            start = end
+        }
+        return translated
+    }
+
+    private fun requestRemoteTranslationBatchWithRetry(
+        serviceUrl: String,
+        texts: List<String>,
+        from: Int,
+        to: Int,
+        total: Int
+    ): List<String> {
+        var lastError: Exception? = null
+        repeat(3) { attempt ->
+            try {
+                return requestRemoteTranslationBatch(serviceUrl, texts)
+            } catch (error: Exception) {
+                lastError = error
+                if (attempt < 2) {
+                    progress("电脑端翻译中：$from-$to/$total 连接中断，正在重试 ${attempt + 2}/3...")
+                    Thread.sleep(1200L * (attempt + 1))
+                }
+            }
+        }
+        throw IllegalStateException("电脑端第 $from-$to/$total 句翻译失败：${lastError?.message}", lastError)
+    }
+
+    private fun requestRemoteTranslationBatch(serviceUrl: String, texts: List<String>): List<String> {
         val payload = JSONObject().apply {
             val array = JSONArray()
             texts.forEach { array.put(it) }
@@ -508,6 +543,7 @@ class CaptionGenerationService : Service() {
             readTimeout = 10 * 60 * 1000
             doOutput = true
             setRequestProperty("Content-Type", "application/json; charset=utf-8")
+            setRequestProperty("Accept", "application/json")
             setRequestProperty("Connection", "close")
             setFixedLengthStreamingMode(payload.size)
         }
@@ -707,6 +743,7 @@ class CaptionGenerationService : Service() {
         private const val CHANNEL_ID = "caption_generation"
         private const val NOTIFICATION_ID = 42
         private const val SUBTITLE_CACHE_DIR = "subtitles_cache"
+        private const val REMOTE_TRANSLATION_BATCH_SIZE = 16
         private const val PREFS_NAME = "video_english_learning"
         private const val SERVICE_URL_KEY = "whisper_service_url"
         private const val SERVICE_URL_CANDIDATES_KEY = "whisper_service_url_candidates"

@@ -2107,7 +2107,6 @@ class LearningActivity : Activity() {
     private fun serviceUrlCandidates(): List<String> {
         val ordered = linkedSetOf<String>()
         val defaultUrl = if (isRunningOnEmulator()) emulatorServiceUrl else phoneUsbServiceUrl
-        ordered += defaultUrl
         val current = currentServiceUrl()
         if (current.isNotBlank()) ordered += current
         val saved = getSharedPreferences(prefsName, MODE_PRIVATE)
@@ -2120,6 +2119,7 @@ class LearningActivity : Activity() {
                 if (url.isNotBlank()) ordered += url
             }
         }
+        ordered += defaultUrl
         return ordered
             .filterNot { !isRunningOnEmulator() && it.contains("10.0.2.2") }
             .ifEmpty { listOf(defaultUrl) }
