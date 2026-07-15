@@ -18,6 +18,7 @@ import android.media.MediaPlayer
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.OpenableColumns
 import android.speech.tts.TextToSpeech
 import android.text.SpannableString
 import android.text.Spanned
@@ -34,6 +35,7 @@ import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.ProgressBar
 import android.widget.SeekBar
 import android.widget.ScrollView
 import android.widget.TextView
@@ -76,6 +78,7 @@ class LearningActivity : Activity() {
     private lateinit var playbackSeekBar: SeekBar
     private lateinit var playbackTimeText: TextView
     private lateinit var transientNavRow: LinearLayout
+    private var tabContent: LinearLayout? = null
     private lateinit var dictionary: Dictionary
     private lateinit var onDeviceWhisper: OnDeviceWhisperTranscriber
 
@@ -113,12 +116,16 @@ class LearningActivity : Activity() {
     private var videoPreviewToken = 0
     private var pendingExportBilingual = false
     private var translationInProgress = false
+    private var currentTab = MainTab.LEARNING
+    private var lastTaskTabRenderAtMs = 0L
+    private var taskTabRenderScheduled = false
 
     private val pickVideoRequest = 81
     private val pickSubtitleRequest = 82
     private val permissionRequest = 83
     private val notificationPermissionRequest = 84
     private val exportSubtitleRequest = 85
+    private val pickBatchVideoRequest = 86
     private val testVideoPath = "/sdcard/Download/Full Gear List for Solo Backpacking.mp4"
     private val prefsName = "video_english_learning"
     private val serviceUrlKey = "whisper_service_url"
@@ -182,7 +189,10 @@ class LearningActivity : Activity() {
         override fun onReceive(context: android.content.Context?, intent: Intent?) {
             when (intent?.action) {
                 CaptionGenerationService.ACTION_PROGRESS -> {
-                    statusText.text = intent.getStringExtra(CaptionGenerationService.EXTRA_MESSAGE).orEmpty()
+                    if (currentTab == MainTab.LEARNING && ::statusText.isInitialized) {
+                        statusText.text = intent.getStringExtra(CaptionGenerationService.EXTRA_MESSAGE).orEmpty()
+                    }
+                    renderCurrentTaskTabThrottled()
                 }
                 CaptionGenerationService.ACTION_DONE -> {
                     val uriText = intent.getStringExtra(CaptionGenerationService.EXTRA_VIDEO_URI)
@@ -193,6 +203,7 @@ class LearningActivity : Activity() {
                     } else {
                         statusText.text = "字幕已在后台生成完成，重新导入对应视频会自动加载。"
                     }
+                    renderCurrentTaskTab()
                 }
                 CaptionGenerationService.ACTION_TRANSLATION_DONE -> {
                     translationInProgress = false
@@ -205,6 +216,7 @@ class LearningActivity : Activity() {
                     } else {
                         statusText.text = "后台翻译已完成，重新导入对应视频会自动加载。"
                     }
+                    renderCurrentTaskTab()
                 }
                 CaptionGenerationService.ACTION_ERROR -> {
                     translationInProgress = false
@@ -220,6 +232,7 @@ class LearningActivity : Activity() {
                     }
                     statusText.text = "$label：$message"
                     Toast.makeText(this@LearningActivity, "$label：$message", Toast.LENGTH_LONG).show()
+                    renderCurrentTaskTab()
                 }
             }
         }
@@ -273,20 +286,33 @@ class LearningActivity : Activity() {
 
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
+        val uri = currentVideoUri
+        val position = mediaPlayer?.currentPosition ?: pendingResumePositionMs
+        pendingResumePositionMs = position.coerceAtLeast(0)
+        normalPlayback = false
         mediaPlayer?.release()
         videoSurface?.release()
         mediaPlayer = null
         videoSurface = null
         buildUi()
-        if (selectedIndex >= 0) {
-            handler.postDelayed({ playLine(selectedIndex) }, 700)
+        if (uri != null) {
+            handler.postDelayed({
+                loadVideo(uri, readyMessage(), loadCached = false, restoreSavedState = false)
+            }, 250)
         }
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
-        if (resultCode != RESULT_OK || data?.data == null) return
-        val uri = data.data!!
+        if (resultCode != RESULT_OK || data == null) return
+        if (requestCode == pickBatchVideoRequest) {
+            val uris = selectedUrisFromIntent(data)
+            if (uris.isNotEmpty()) {
+                enqueueCaptionTasks(uris)
+            }
+            return
+        }
+        val uri = data.data ?: return
         runCatching {
             contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
@@ -314,7 +340,10 @@ class LearningActivity : Activity() {
     }
 
     override fun onBackPressed() {
-        if (showingWordbook) {
+        if (currentTab != MainTab.LEARNING) {
+            currentTab = MainTab.LEARNING
+            buildUi()
+        } else if (showingWordbook) {
             buildUi()
         } else {
             super.onBackPressed()
@@ -322,6 +351,10 @@ class LearningActivity : Activity() {
     }
 
     private fun buildUi() {
+        if (currentTab != MainTab.LEARNING) {
+            buildTabPage(currentTab)
+            return
+        }
         val landscape = resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
         val root = LinearLayout(this).apply {
             orientation = if (landscape) LinearLayout.HORIZONTAL else LinearLayout.VERTICAL
@@ -530,7 +563,7 @@ class LearningActivity : Activity() {
             root.addView(subtitlePane, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
         }
 
-        setContentView(root)
+        setContentView(withBottomNav(root))
         updateButtons()
         updateTransientNavigation()
         renderSubtitles()
@@ -539,6 +572,469 @@ class LearningActivity : Activity() {
             restoreLastSessionOrOpenTest()
         }
         showingWordbook = false
+    }
+
+    private fun withBottomNav(content: View): LinearLayout {
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(0xFFF7F8F5.toInt())
+            addView(content, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+            addView(bottomNav(), LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(68)))
+        }
+    }
+
+    private fun bottomNav(): LinearLayout {
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            setBackgroundColor(0xFFFFFFFF.toInt())
+            setPadding(4, 4, 4, 4)
+            MainTab.values().forEach { tab ->
+                addView(tabButton(tab), LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f))
+            }
+        }
+    }
+
+    private fun tabButton(tab: MainTab): LinearLayout {
+        val selected = tab == currentTab
+        val color = if (selected) 0xFF078A8F.toInt() else 0xFF566166.toInt()
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            setBackgroundColor(0xFFFFFFFF.toInt())
+            addView(ImageView(this@LearningActivity).apply {
+                setImageResource(tab.iconRes)
+                setColorFilter(color)
+            }, LinearLayout.LayoutParams(dp(28), dp(28)))
+            addView(TextView(this@LearningActivity).apply {
+                text = tab.label
+                gravity = Gravity.CENTER
+                textSize = 12f
+                setTextColor(color)
+            }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+            setOnClickListener {
+                if (currentTab == tab) return@setOnClickListener
+                saveLearningState()
+                currentTab = tab
+                buildUi()
+            }
+        }
+    }
+
+    private fun buildTabPage(tab: MainTab) {
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(0xFFF7F8F5.toInt())
+        }
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(14, statusBarHeightPx() + 12, 14, 8)
+        }
+        tabContent = content
+        when (tab) {
+            MainTab.PROCESSING -> renderProcessingPage(content)
+            MainTab.COMPLETED -> renderCompletedPage(content)
+            MainTab.MINE -> renderMinePage(content)
+            MainTab.LEARNING -> Unit
+        }
+        root.addView(content, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+        root.addView(bottomNav(), LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(68)))
+        setContentView(root)
+    }
+
+    private fun renderProcessingPage(parent: LinearLayout) {
+        parent.removeAllViews()
+        parent.addView(pageTitle("处理中"))
+        parent.addView(primaryButton("＋ 添加视频") { pickBatchVideos() }, LinearLayout.LayoutParams.MATCH_PARENT, dp(48))
+        val tasks = CaptionTaskStore.all(this).filter {
+            it.status == CaptionTaskStatus.QUEUED || it.status == CaptionTaskStatus.RUNNING || it.status == CaptionTaskStatus.FAILED
+        }.sortedByDescending { it.updatedAt }
+        val scroll = ScrollView(this)
+        val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        if (tasks.isEmpty()) {
+            list.addView(illustratedEmptyState("还没有处理中的任务。\n点“添加视频”可以一次选择多个视频生成英文字幕和中文翻译。"))
+        } else {
+            tasks.forEach { task -> list.addView(processingTaskCard(task)) }
+        }
+        scroll.addView(list)
+        parent.addView(scroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+    }
+
+    private fun renderCompletedPage(parent: LinearLayout) {
+        parent.removeAllViews()
+        parent.addView(pageTitle("已完成"))
+        val tasks = CaptionTaskStore.all(this)
+            .filter { it.status == CaptionTaskStatus.DONE }
+            .sortedByDescending { it.completedAt }
+        val scroll = ScrollView(this)
+        val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        if (tasks.isEmpty()) {
+            list.addView(illustratedEmptyState("还没有完成的视频。\n生成完成后会出现在这里，可以直接开始学习或导出字幕。"))
+        } else {
+            tasks.forEach { task -> list.addView(completedTaskCard(task)) }
+        }
+        scroll.addView(list)
+        parent.addView(scroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+    }
+
+    private fun renderMinePage(parent: LinearLayout) {
+        parent.removeAllViews()
+        parent.addView(pageTitle("我的"))
+        val scroll = ScrollView(this)
+        val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        list.addView(infoCard("强哥", "作者：强哥\n版本：${versionName()}\n看视频学英语"))
+        list.addView(menuCard("使用说明", "查看视频学习、字幕生成和电脑端服务连接方法") { showUsageDialog() })
+        list.addView(menuCard("电脑端服务", "运行 start_video_english_service.ps1 后，App 会优先使用 USB / 局域网 / 公网") { showServiceUrlDialog() })
+        list.addView(menuCard("GitHub", "开源项目，欢迎 star") {
+            Toast.makeText(this, "GitHub 地址请查看 README。", Toast.LENGTH_SHORT).show()
+        })
+        list.addView(menuCard("隐私说明", "视频只会在你点击生成时上传到你自己配置的电脑端服务") { showPrivacyDialog() })
+        scroll.addView(list)
+        parent.addView(scroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+    }
+
+    private fun processingTaskCard(task: CaptionTask): View {
+        val card = taskCard()
+        val top = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        top.addView(iconThumbnailPlaceholder(), LinearLayout.LayoutParams(dp(92), dp(70)))
+        val info = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(12, 0, 0, 0)
+        }
+        info.addView(cardTitle(task.title))
+        info.addView(cardMeta("阶段：${task.stage}"))
+        info.addView(cardMeta(task.message.ifBlank { task.status.id }))
+        top.addView(info, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        if (task.connectionLabel.isNotBlank()) top.addView(badge(task.connectionLabel))
+        card.addView(top)
+        card.addView(ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+            max = 100
+            progress = task.progress.coerceIn(0, 100)
+        }, LinearLayout.LayoutParams.MATCH_PARENT, dp(12))
+        val actions = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.END
+        }
+        if (task.status == CaptionTaskStatus.FAILED) {
+            actions.addView(smallButton("重试") { retryTask(task) })
+        }
+        actions.addView(smallButton("取消") { cancelTask(task) })
+        card.addView(actions)
+        return card
+    }
+
+    private fun completedTaskCard(task: CaptionTask): View {
+        val card = taskCard()
+        val top = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        top.addView(iconThumbnailPlaceholder(), LinearLayout.LayoutParams(dp(92), dp(70)))
+        val info = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(12, 0, 0, 0)
+        }
+        info.addView(cardTitle(task.title))
+        info.addView(cardMeta("字幕：${task.subtitleCount} 句｜${if (task.bilingual) "双语" else "英文"}"))
+        info.addView(cardMeta("完成时间：${formatDateTime(task.completedAt)}"))
+        top.addView(info, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        card.addView(top)
+        val actions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        actions.addView(smallButton("开始学习") { openCompletedTask(task) })
+        actions.addView(smallButton("导出") { openCompletedTask(task, exportAfterLoad = true) })
+        actions.addView(smallButton("重翻") { retranslateTask(task) })
+        actions.addView(smallButton("删除") { showDeleteTaskDialog(task) })
+        card.addView(actions)
+        return card
+    }
+
+    private fun pageTitle(title: String): TextView = TextView(this).apply {
+        text = title
+        textSize = 22f
+        setTextColor(0xFF102027.toInt())
+        setPadding(4, 0, 4, 18)
+    }
+
+    private fun primaryButton(label: String, action: () -> Unit): Button = Button(this).apply {
+        text = label
+        isAllCaps = false
+        textSize = 15f
+        setTextColor(0xFFFFFFFF.toInt())
+        background = roundedBackground(0xFF078A8F.toInt(), 8f)
+        setOnClickListener { action() }
+    }
+
+    private fun smallButton(label: String, action: () -> Unit): Button = Button(this).apply {
+        text = label
+        isAllCaps = false
+        textSize = 12f
+        minWidth = 0
+        minimumWidth = 0
+        setTextColor(if (label == "删除" || label == "取消") 0xFFD13B3B.toInt() else 0xFF078A8F.toInt())
+        background = roundedStrokeBackground(0xFFFFFFFF.toInt(), if (label == "删除" || label == "取消") 0xFFFFB4B4.toInt() else 0xFF8FCFD1.toInt(), 7f)
+        setOnClickListener { action() }
+        layoutParams = LinearLayout.LayoutParams(0, dp(38), 1f).apply { setMargins(4, 6, 4, 0) }
+    }
+
+    private fun taskCard(): LinearLayout = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        setPadding(12, 12, 12, 12)
+        background = roundedStrokeBackground(0xFFFFFFFF.toInt(), 0xFFE4E9E8.toInt(), 8f)
+        layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            setMargins(0, 10, 0, 4)
+        }
+    }
+
+    private fun infoCard(title: String, body: String): View {
+        return taskCard().apply {
+            addView(cardTitle(title))
+            addView(cardMeta(body))
+        }
+    }
+
+    private fun menuCard(title: String, body: String, action: () -> Unit): View {
+        return taskCard().apply {
+            addView(cardTitle(title))
+            addView(cardMeta(body))
+            setOnClickListener { action() }
+        }
+    }
+
+    private fun cardTitle(value: String): TextView = TextView(this).apply {
+        text = value
+        textSize = 15f
+        setTextColor(0xFF162A30.toInt())
+        maxLines = 2
+    }
+
+    private fun cardMeta(value: String): TextView = TextView(this).apply {
+        text = value
+        textSize = 12f
+        setTextColor(0xFF68777D.toInt())
+        setPadding(0, 4, 0, 0)
+    }
+
+    private fun thumbnailPlaceholder(): TextView = TextView(this).apply {
+        text = "▶"
+        gravity = Gravity.CENTER
+        textSize = 24f
+        setTextColor(0xFFFFFFFF.toInt())
+        background = roundedBackground(0xFF7AA7A8.toInt(), 8f)
+    }
+
+    private fun badge(value: String): TextView = TextView(this).apply {
+        text = value
+        textSize = 12f
+        gravity = Gravity.CENTER
+        setTextColor(0xFF078A8F.toInt())
+        setPadding(8, 4, 8, 4)
+        background = roundedStrokeBackground(0xFFFFFFFF.toInt(), 0xFF0BA3A8.toInt(), 6f)
+    }
+
+    private fun emptyState(message: String): TextView = TextView(this).apply {
+        text = message
+        textSize = 16f
+        gravity = Gravity.CENTER
+        setTextColor(0xFF718188.toInt())
+        setPadding(24, dp(150), 24, 24)
+    }
+
+    private fun iconThumbnailPlaceholder(): FrameLayout = FrameLayout(this).apply {
+        background = roundedBackground(0xFF7AA7A8.toInt(), 8f)
+        addView(ImageView(this@LearningActivity).apply {
+            setImageResource(R.drawable.ic_video_tile)
+            setColorFilter(0xFFFFFFFF.toInt())
+        }, FrameLayout.LayoutParams(dp(42), dp(42), Gravity.CENTER))
+    }
+
+    private fun illustratedEmptyState(message: String): LinearLayout = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        gravity = Gravity.CENTER
+        setPadding(24, dp(130), 24, 24)
+        addView(ImageView(this@LearningActivity).apply {
+            setImageResource(R.drawable.ic_empty_box)
+        }, LinearLayout.LayoutParams(dp(116), dp(116)).apply {
+            bottomMargin = dp(18)
+        })
+        addView(TextView(this@LearningActivity).apply {
+            text = message
+            textSize = 16f
+            gravity = Gravity.CENTER
+            setTextColor(0xFF718188.toInt())
+            setLineSpacing(4f, 1f)
+        }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+    }
+
+    private fun roundedStrokeBackground(fillColor: Int, strokeColor: Int, radiusDp: Float): GradientDrawable {
+        return GradientDrawable().apply {
+            setColor(fillColor)
+            cornerRadius = dp(radiusDp.toInt()).toFloat()
+            setStroke(dp(1), strokeColor)
+        }
+    }
+
+    private fun pickBatchVideos() {
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "video/*"
+            putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            addFlags(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+        }
+        startActivityForResult(intent, pickBatchVideoRequest)
+    }
+
+    private fun selectedUrisFromIntent(data: Intent): List<Uri> {
+        val result = mutableListOf<Uri>()
+        data.clipData?.let { clip ->
+            for (i in 0 until clip.itemCount) result += clip.getItemAt(i).uri
+        }
+        data.data?.let { result += it }
+        return result.distinctBy { it.toString() }
+    }
+
+    private fun enqueueCaptionTasks(uris: List<Uri>) {
+        requestNotificationPermissionIfNeeded()
+        uris.forEach { uri ->
+            runCatching {
+                contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            val task = CaptionTaskStore.enqueue(this, uri, displayName(uri))
+            startCaptionTaskService(task)
+        }
+        currentTab = MainTab.PROCESSING
+        buildUi()
+        Toast.makeText(this, "已添加 ${uris.size} 个视频到处理队列。", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun startCaptionTaskService(task: CaptionTask) {
+        val intent = Intent(this, CaptionGenerationService::class.java)
+            .putExtra(CaptionGenerationService.EXTRA_TASK_ID, task.id)
+            .putExtra(CaptionGenerationService.EXTRA_VIDEO_URI, task.uri)
+            .putExtra(CaptionGenerationService.EXTRA_VIDEO_TITLE, task.title)
+            .putExtra(CaptionGenerationService.EXTRA_SERVICE_URL, currentServiceUrl())
+            .putExtra(CaptionGenerationService.EXTRA_SERVICE_URLS, JSONArray(serviceUrlCandidates()).toString())
+            .putExtra(CaptionGenerationService.EXTRA_TASK_KIND, CaptionGenerationService.TASK_GENERATE)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(intent)
+        } else {
+            startService(intent)
+        }
+    }
+
+    private fun retryTask(task: CaptionTask) {
+        val uri = Uri.parse(task.uri)
+        val queued = CaptionTaskStore.enqueue(this, uri, task.title)
+        startCaptionTaskService(queued)
+        renderCurrentTaskTab()
+    }
+
+    private fun cancelTask(task: CaptionTask) {
+        CaptionTaskStore.cancel(this, task.id)
+        renderCurrentTaskTab()
+    }
+
+    private fun retranslateTask(task: CaptionTask) {
+        currentTab = MainTab.LEARNING
+        buildUi()
+        loadVideo(Uri.parse(task.uri), "已载入视频，开始电脑端重新翻译。")
+        handler.postDelayed({
+            subtitles.replaceAll { it.copy(chineseText = null, translationSource = null) }
+            saveCachedSubtitles()
+            startSubtitleTranslationService(CaptionGenerationService.TASK_TRANSLATE_REMOTE)
+        }, 500)
+    }
+
+    private fun openCompletedTask(task: CaptionTask, exportAfterLoad: Boolean = false) {
+        currentTab = MainTab.LEARNING
+        buildUi()
+        loadVideo(Uri.parse(task.uri), "已从完成列表载入。")
+        if (exportAfterLoad) {
+            handler.postDelayed({ showExportSubtitleDialog() }, 700)
+        }
+    }
+
+    private fun showDeleteTaskDialog(task: CaptionTask) {
+        AlertDialog.Builder(this)
+            .setTitle("删除记录")
+            .setMessage("要如何删除“${task.title}”？")
+            .setPositiveButton("只删记录") { _, _ ->
+                CaptionTaskStore.delete(this, task.id)
+                renderCurrentTaskTab()
+            }
+            .setNeutralButton("记录和字幕都删") { _, _ ->
+                CaptionTaskStore.delete(this, task.id)
+                subtitleCacheFile(Uri.parse(task.uri)).delete()
+                renderCurrentTaskTab()
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    private fun renderCurrentTaskTab() {
+        val content = tabContent ?: return
+        when (currentTab) {
+            MainTab.PROCESSING -> renderProcessingPage(content)
+            MainTab.COMPLETED -> renderCompletedPage(content)
+            MainTab.MINE -> renderMinePage(content)
+            MainTab.LEARNING -> Unit
+        }
+    }
+
+    private fun renderCurrentTaskTabThrottled() {
+        if (currentTab != MainTab.PROCESSING) return
+        val now = System.currentTimeMillis()
+        if (now - lastTaskTabRenderAtMs >= 500L) {
+            lastTaskTabRenderAtMs = now
+            renderCurrentTaskTab()
+            return
+        }
+        if (taskTabRenderScheduled) return
+        taskTabRenderScheduled = true
+        handler.postDelayed({
+            taskTabRenderScheduled = false
+            if (currentTab == MainTab.PROCESSING) {
+                lastTaskTabRenderAtMs = System.currentTimeMillis()
+                renderCurrentTaskTab()
+            }
+        }, 500L - (now - lastTaskTabRenderAtMs))
+    }
+
+    private fun displayName(uri: Uri): String {
+        contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst()) {
+                val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                if (index >= 0) return cursor.getString(index).orEmpty().ifBlank { uri.lastPathSegment.orEmpty() }
+            }
+        }
+        return uri.lastPathSegment?.substringAfterLast('/')?.ifBlank { null } ?: "未命名视频"
+    }
+
+    private fun formatDateTime(value: Long): String {
+        if (value <= 0L) return "--"
+        return SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.CHINA).format(Date(value))
+    }
+
+    private fun versionName(): String =
+        runCatching { packageManager.getPackageInfo(packageName, 0).versionName ?: "2.0.0" }.getOrDefault("2.0.0")
+
+    private fun showUsageDialog() {
+        AlertDialog.Builder(this)
+            .setTitle("使用说明")
+            .setMessage("学习页用于播放、复读、查词和导出字幕。\n\n处理中页可以一次选择多个视频，后台逐个生成英文字幕并调用电脑端翻译成中文。\n\n已完成页可以开始学习、导出字幕、重新翻译或删除记录。\n\n电脑端请运行 tools/start_video_english_service.ps1。")
+            .setPositiveButton("知道了", null)
+            .show()
+    }
+
+    private fun showPrivacyDialog() {
+        AlertDialog.Builder(this)
+            .setTitle("隐私说明")
+            .setMessage("App 只会在你点击生成字幕或添加处理任务时读取所选视频，并把音频上传到你自己配置的电脑端 Whisper 服务。字幕、进度和任务记录保存在本机私有目录。")
+            .setPositiveButton("知道了", null)
+            .show()
     }
 
     private fun controlRow(): LinearLayout {
@@ -1573,6 +2069,7 @@ class LearningActivity : Activity() {
         statusText.text = "已开始后台生成字幕。可以切到其他软件，完成后会自动加载字幕。"
         val intent = Intent(this, CaptionGenerationService::class.java)
             .putExtra(CaptionGenerationService.EXTRA_VIDEO_URI, uri.toString())
+            .putExtra(CaptionGenerationService.EXTRA_VIDEO_TITLE, displayName(uri))
             .putExtra(CaptionGenerationService.EXTRA_SERVICE_URL, currentServiceUrl())
             .putExtra(CaptionGenerationService.EXTRA_SERVICE_URLS, JSONArray(serviceUrlCandidates()).toString())
             .putExtra(CaptionGenerationService.EXTRA_TASK_KIND, CaptionGenerationService.TASK_GENERATE)
@@ -1599,6 +2096,7 @@ class LearningActivity : Activity() {
         statusText.text = "已开始后台${label}翻译。完成后会自动更新本地字幕。"
         val intent = Intent(this, CaptionGenerationService::class.java)
             .putExtra(CaptionGenerationService.EXTRA_VIDEO_URI, uri.toString())
+            .putExtra(CaptionGenerationService.EXTRA_VIDEO_TITLE, displayName(uri))
             .putExtra(CaptionGenerationService.EXTRA_SERVICE_URL, currentServiceUrl())
             .putExtra(CaptionGenerationService.EXTRA_SERVICE_URLS, JSONArray(serviceUrlCandidates()).toString())
             .putExtra(CaptionGenerationService.EXTRA_TASK_KIND, taskKind)
@@ -2108,6 +2606,7 @@ class LearningActivity : Activity() {
         val ordered = linkedSetOf<String>()
         val defaultUrl = if (isRunningOnEmulator()) emulatorServiceUrl else phoneUsbServiceUrl
         val current = currentServiceUrl()
+        ordered += defaultUrl
         if (current.isNotBlank()) ordered += current
         val saved = getSharedPreferences(prefsName, MODE_PRIVATE)
             .getString(serviceUrlCandidatesKey, null)
@@ -2119,10 +2618,22 @@ class LearningActivity : Activity() {
                 if (url.isNotBlank()) ordered += url
             }
         }
-        ordered += defaultUrl
         return ordered
             .filterNot { !isRunningOnEmulator() && it.contains("10.0.2.2") }
+            .sortedWith(compareBy { serviceUrlPriority(it) })
             .ifEmpty { listOf(defaultUrl) }
+    }
+
+    private fun serviceUrlPriority(url: String): Int {
+        val lower = url.lowercase()
+        return when {
+            isRunningOnEmulator() && lower.contains("10.0.2.2") -> 0
+            !isRunningOnEmulator() && lower.contains("127.0.0.1") -> 0
+            lower.startsWith("http://192.168.") || lower.startsWith("http://10.") || lower.startsWith("http://172.") -> 1
+            lower.startsWith("http://") -> 2
+            lower.startsWith("https://") -> 3
+            else -> 4
+        }
     }
 
     private fun saveServiceUrlCandidates(urls: List<String>) {
@@ -2167,7 +2678,7 @@ class LearningActivity : Activity() {
             }
         }
         val errors = mutableListOf<String>()
-        for (url in expanded) {
+        for (url in expanded.sortedWith(compareBy { serviceUrlPriority(it) })) {
             runCatching {
                 requestJobJson(URL(pingUrl(url)))
             }.onSuccess {
@@ -2905,6 +3416,13 @@ class LearningActivity : Activity() {
 
         val safeVideoEndMs: Int
             get() = ((videoDurationMs ?: 0) - 500).coerceAtLeast(0)
+    }
+
+    private enum class MainTab(val label: String, val iconRes: Int) {
+        LEARNING("学习", R.drawable.ic_tab_learning),
+        PROCESSING("处理中", R.drawable.ic_tab_processing),
+        COMPLETED("已完成", R.drawable.ic_tab_completed),
+        MINE("我的", R.drawable.ic_tab_mine)
     }
 
     private enum class DisplayMode {

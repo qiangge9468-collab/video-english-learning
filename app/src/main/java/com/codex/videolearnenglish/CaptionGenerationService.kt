@@ -9,6 +9,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.net.Uri
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
@@ -29,7 +30,13 @@ import java.util.concurrent.atomic.AtomicReference
 class CaptionGenerationService : Service() {
     private lateinit var onDeviceWhisper: OnDeviceWhisperTranscriber
     private var wakeLock: PowerManager.WakeLock? = null
+    private var wifiLock: WifiManager.WifiLock? = null
+    @Volatile private var lastNotificationProgress: Int = -1
     @Volatile private var running = false
+    @Volatile private var currentTaskId: String? = null
+    @Volatile private var lastProgressMessage: String = ""
+    @Volatile private var lastProgressPercent: Int = -1
+    @Volatile private var lastProgressSentAtMs: Long = 0L
 
     override fun onCreate() {
         super.onCreate()
@@ -45,15 +52,29 @@ class CaptionGenerationService : Service() {
             stopSelf(startId)
             return START_NOT_STICKY
         }
-        if (running) {
-            sendProgress("已有字幕生成任务正在进行中。")
-            return START_NOT_STICKY
-        }
         val videoUri = Uri.parse(uriText)
         val taskKind = intent?.getStringExtra(EXTRA_TASK_KIND).orEmpty().ifBlank { TASK_GENERATE }
+        val task = intent?.getStringExtra(EXTRA_TASK_ID)?.takeIf { it.isNotBlank() }?.let { taskId ->
+            CaptionTaskStore.all(this).firstOrNull { it.id == taskId }
+        } ?: CaptionTaskStore.enqueue(
+            this,
+            videoUri,
+            intent?.getStringExtra(EXTRA_VIDEO_TITLE).orEmpty()
+        )
+        if (running) {
+            sendProgress("已加入字幕生成队列：${task.title}")
+            return START_STICKY
+        }
         running = true
+        currentTaskId = task.id
+        lastProgressMessage = ""
+        lastProgressPercent = -1
+        lastProgressSentAtMs = 0L
+        CaptionTaskStore.markRunning(this, task.id, "正在准备后台任务")
+        lastNotificationProgress = -1
         startCaptionForeground(if (taskKind == TASK_GENERATE) "正在检查 Whisper 服务连接..." else "正在准备后台翻译...")
         acquireWakeLock()
+        acquireWifiLock()
         Thread {
             var success = false
             var audioForUpload: RemoteAudioFile? = null
@@ -64,6 +85,7 @@ class CaptionGenerationService : Service() {
                     if (success) {
                         val label = if (taskKind == TASK_TRANSLATE_REMOTE) "电脑端" else "手机端"
                         progress("已用${label}完成 $count 句中文翻译。")
+                        CaptionTaskStore.markDone(this, task.id, count)
                         sendTranslationDone(videoUri.toString(), count, label)
                     } else {
                         throw IllegalStateException("没有可翻译的英文字幕。")
@@ -85,8 +107,8 @@ class CaptionGenerationService : Service() {
                 audioForUpload = audio
                 progress("音频已准备：${formatMs(audio.durationMs)}，${formatBytes(audio.file.length())}，正在上传到 Whisper 服务...")
                 val json = try {
-                    val jobId = createTranscriptJobWithRetry(selectedServiceUrl, audio)
-                    pollTranscriptJob(selectedServiceUrl, jobId)
+                    val jobId = createTranscriptJobWithRetry(serviceUrls, selectedServiceUrl, audio)
+                    pollTranscriptJob(serviceUrls, selectedServiceUrl, jobId)
                 } catch (error: Exception) {
                     if (error.message.orEmpty().contains("HTTP 404")) {
                         progress("服务端不支持进度任务接口，改用同步生成字幕...")
@@ -100,6 +122,7 @@ class CaptionGenerationService : Service() {
                 if (success) {
                     onDeviceWhisper.deleteCachedRemoteAudio(videoUri)
                     progress("已生成并缓存 $count 条字幕。")
+                    CaptionTaskStore.markDone(this, task.id, count)
                     sendDone(videoUri.toString(), count)
                 } else {
                     throw IllegalStateException("没有生成字幕。")
@@ -111,27 +134,83 @@ class CaptionGenerationService : Service() {
                     audioForUpload?.let { append("。已保留音频缓存：").append(formatBytes(it.file.length())).append("，下次会直接重试上传。") }
                 }
                 updateNotification(if (isTranslationTask) "中文翻译失败：$message" else "生成字幕失败：$message")
+                CaptionTaskStore.markFailed(this, task.id, message)
                 sendError(message, taskKind)
             } finally {
-            running = false
-            releaseWakeLock()
-            stopForegroundCompat()
-            stopSelf(startId)
-        }
+                running = false
+                currentTaskId = null
+                releaseWakeLock()
+                releaseWifiLock()
+                startNextQueuedTask()
+                stopForegroundCompat()
+                stopSelf(startId)
+            }
         }.start()
-        return START_REDELIVER_INTENT
+        return START_STICKY
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
         releaseWakeLock()
+        releaseWifiLock()
         super.onDestroy()
     }
 
     private fun progress(message: String) {
+        val percent = extractPercent(message)
+        percent?.let { lastNotificationProgress = it }
+        val now = System.currentTimeMillis()
+        val stageChanged = progressStage(message) != progressStage(lastProgressMessage)
+        val percentChanged = percent != null && percent != lastProgressPercent
+        val force = message != lastProgressMessage && (stageChanged || message.contains("失败") || message.contains("完成"))
+        if (!force && !percentChanged && now - lastProgressSentAtMs < 700L) return
+        if (!force && now - lastProgressSentAtMs < 300L) return
+
+        lastProgressMessage = message
+        percent?.let { lastProgressPercent = it }
+        lastProgressSentAtMs = now
+        currentTaskId?.let { CaptionTaskStore.updateProgress(this, it, message) }
         updateNotification(message)
         sendProgress(message)
+    }
+
+    private fun startNextQueuedTask() {
+        val next = CaptionTaskStore.queued(this) ?: return
+        val intent = Intent(this, CaptionGenerationService::class.java)
+            .putExtra(EXTRA_TASK_ID, next.id)
+            .putExtra(EXTRA_VIDEO_URI, next.uri)
+            .putExtra(EXTRA_VIDEO_TITLE, next.title)
+            .putExtra(EXTRA_TASK_KIND, TASK_GENERATE)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(intent)
+        } else {
+            startService(intent)
+        }
+    }
+
+    private fun extractPercent(message: String): Int? {
+        Regex("""(\d{1,3})%""").find(message)?.let { match ->
+            return match.groupValues[1].toIntOrNull()?.coerceIn(0, 100)
+        }
+        Regex("""(\d+)\s*/\s*(\d+)""").find(message)?.let { match ->
+            val current = match.groupValues[1].toIntOrNull() ?: return null
+            val total = match.groupValues[2].toIntOrNull()?.takeIf { it > 0 } ?: return null
+            return (current * 100 / total).coerceIn(0, 100)
+        }
+        return null
+    }
+
+    private fun progressStage(message: String): String {
+        return when {
+            message.contains("提取音频") || message.contains("压缩音频") -> "extract"
+            message.contains("上传") -> "upload"
+            message.contains("翻译") -> "translate"
+            message.contains("Whisper") || message.contains("生成字幕") -> "transcribe"
+            message.contains("保存") -> "save"
+            message.contains("连接") -> "connect"
+            else -> "other"
+        }
     }
 
     private fun sendProgress(message: String) {
@@ -168,6 +247,7 @@ class CaptionGenerationService : Service() {
 
     private fun serviceUrlCandidates(intent: Intent?, primaryUrl: String): List<String> {
         val ordered = linkedSetOf<String>()
+        ordered += if (isRunningOnEmulator()) EMULATOR_SERVICE_URL else PHONE_USB_SERVICE_URL
         val raw = intent?.getStringExtra(EXTRA_SERVICE_URLS).orEmpty()
         runCatching {
             val array = JSONArray(raw)
@@ -187,7 +267,9 @@ class CaptionGenerationService : Service() {
                 if (url.isNotBlank()) ordered += url
             }
         }
-        return ordered.toList()
+        return ordered
+            .filterNot { !isRunningOnEmulator() && it.contains("10.0.2.2") }
+            .sortedWith(compareBy { serviceUrlPriority(it) })
     }
 
     private fun selectReachableServiceUrl(candidates: List<String>): String {
@@ -203,7 +285,7 @@ class CaptionGenerationService : Service() {
             }
         }
         val errors = mutableListOf<String>()
-        for (url in expanded) {
+        for (url in expanded.sortedWith(compareBy { serviceUrlPriority(it) })) {
             runCatching {
                 requestJobJson(URL(pingUrl(url)))
             }.onSuccess {
@@ -218,6 +300,29 @@ class CaptionGenerationService : Service() {
             }
         }
         error("所有 Whisper 地址都连接失败。${errors.takeLast(3).joinToString("；")}")
+    }
+
+    private fun serviceUrlPriority(url: String): Int {
+        val lower = url.lowercase()
+        return when {
+            isRunningOnEmulator() && lower.contains("10.0.2.2") -> 0
+            !isRunningOnEmulator() && lower.contains("127.0.0.1") -> 0
+            lower.startsWith("http://192.168.") || lower.startsWith("http://10.") || lower.startsWith("http://172.") -> 1
+            lower.startsWith("http://") -> 2
+            lower.startsWith("https://") -> 3
+            else -> 4
+        }
+    }
+
+    private fun isRunningOnEmulator(): Boolean {
+        val fingerprint = Build.FINGERPRINT.lowercase()
+        val model = Build.MODEL.lowercase()
+        val product = Build.PRODUCT.lowercase()
+        return fingerprint.contains("generic") ||
+            fingerprint.contains("emulator") ||
+            model.contains("sdk") ||
+            model.contains("emulator") ||
+            product.contains("sdk")
     }
 
     private fun configuredServiceUrls(seedUrl: String): List<String> {
@@ -272,7 +377,8 @@ class CaptionGenerationService : Service() {
         }
     }
 
-    private fun createTranscriptJobWithRetry(serviceUrl: String, audio: RemoteAudioFile): String {
+    private fun createTranscriptJobWithRetry(serviceUrls: List<String>, initialServiceUrl: String, audio: RemoteAudioFile): String {
+        var serviceUrl = initialServiceUrl
         return try {
             createTranscriptJob(serviceUrl, audio)
         } catch (first: Exception) {
@@ -284,6 +390,8 @@ class CaptionGenerationService : Service() {
                 throw first
             }
             Thread.sleep(1_500)
+            serviceUrl = selectReachableServiceUrl(serviceUrls)
+            progress("上传连接中断，已切换到${serviceLabel(serviceUrl)}重试上传...")
             ensureWhisperServiceReachable(serviceUrl)
             createTranscriptJob(serviceUrl, audio)
         }
@@ -353,9 +461,31 @@ class CaptionGenerationService : Service() {
         return requestJobJson(connection)
     }
 
-    private fun pollTranscriptJob(serviceUrl: String, jobId: String): String {
+    private fun pollTranscriptJob(serviceUrls: List<String>, initialServiceUrl: String, jobId: String): String {
+        var serviceUrl = initialServiceUrl
+        var lastSwitchCheckAt = 0L
         while (true) {
-            val json = requestJobJson(URL(jobStatusUrl(serviceUrl, jobId)))
+            val now = System.currentTimeMillis()
+            if (now - lastSwitchCheckAt >= 5_000L) {
+                lastSwitchCheckAt = now
+                val preferred = runCatching { selectReachableServiceUrl(serviceUrls) }.getOrNull()
+                if (preferred != null && preferred != serviceUrl && serviceUrlPriority(preferred) < serviceUrlPriority(serviceUrl)) {
+                    serviceUrl = preferred
+                    progress("检测到更稳定的连接，已切换到${serviceLabel(serviceUrl)}继续等待结果...")
+                }
+            }
+            val json = try {
+                requestJobJson(URL(jobStatusUrl(serviceUrl, jobId)))
+            } catch (error: Exception) {
+                val preferred = selectReachableServiceUrl(serviceUrls)
+                if (preferred != serviceUrl) {
+                    serviceUrl = preferred
+                    progress("轮询连接中断，已切换到${serviceLabel(serviceUrl)}继续等待结果...")
+                    requestJobJson(URL(jobStatusUrl(serviceUrl, jobId)))
+                } else {
+                    throw error
+                }
+            }
             val item = JSONObject(json)
             val status = item.optString("status")
             val percent = item.optInt("progress", 0).coerceIn(0, 100)
@@ -471,7 +601,7 @@ class CaptionGenerationService : Service() {
         val translations = if (taskKind == TASK_TRANSLATE_REMOTE) {
             val selectedServiceUrl = selectReachableServiceUrl(serviceUrls)
             progress("正在请求电脑端翻译 ${texts.size} 句字幕...")
-            requestRemoteTranslations(selectedServiceUrl, texts)
+            requestRemoteTranslations(serviceUrls, selectedServiceUrl, texts)
         } else {
             progress("正在准备手机端翻译模型...")
             requestPhoneTranslations(texts)
@@ -496,13 +626,19 @@ class CaptionGenerationService : Service() {
         return updated
     }
 
-    private fun requestRemoteTranslations(serviceUrl: String, texts: List<String>): List<String> {
+    private fun requestRemoteTranslations(serviceUrls: List<String>, initialServiceUrl: String, texts: List<String>): List<String> {
         val translated = mutableListOf<String>()
         var start = 0
+        var serviceUrl = initialServiceUrl
         while (start < texts.size) {
             val end = (start + REMOTE_TRANSLATION_BATCH_SIZE).coerceAtMost(texts.size)
+            val preferred = runCatching { selectReachableServiceUrl(serviceUrls) }.getOrNull()
+            if (preferred != null && preferred != serviceUrl && serviceUrlPriority(preferred) < serviceUrlPriority(serviceUrl)) {
+                serviceUrl = preferred
+                progress("检测到更稳定的连接，已切换到${serviceLabel(serviceUrl)}继续翻译...")
+            }
             progress("电脑端翻译中：${start + 1}-$end/${texts.size}（首次加载模型可能较久）")
-            translated += requestRemoteTranslationBatchWithRetry(serviceUrl, texts.subList(start, end), start + 1, end, texts.size)
+            translated += requestRemoteTranslationBatchWithRetry(serviceUrls, serviceUrl, texts.subList(start, end), start + 1, end, texts.size)
             progress("电脑端翻译中：$end/${texts.size}")
             start = end
         }
@@ -510,15 +646,22 @@ class CaptionGenerationService : Service() {
     }
 
     private fun requestRemoteTranslationBatchWithRetry(
-        serviceUrl: String,
+        serviceUrls: List<String>,
+        initialServiceUrl: String,
         texts: List<String>,
         from: Int,
         to: Int,
         total: Int
     ): List<String> {
         var lastError: Exception? = null
+        var serviceUrl = initialServiceUrl
         repeat(3) { attempt ->
             try {
+                val preferred = runCatching { selectReachableServiceUrl(serviceUrls) }.getOrNull()
+                if (preferred != null && preferred != serviceUrl && serviceUrlPriority(preferred) < serviceUrlPriority(serviceUrl)) {
+                    serviceUrl = preferred
+                    progress("检测到更稳定的连接，已切换到${serviceLabel(serviceUrl)}重试翻译...")
+                }
                 return requestRemoteTranslationBatch(serviceUrl, texts)
             } catch (error: Exception) {
                 lastError = error
@@ -688,6 +831,7 @@ class CaptionGenerationService : Service() {
             .setContentTitle("正在生成字幕")
             .setContentText(message)
             .setStyle(Notification.BigTextStyle().bigText(message))
+            .setProgress(100, lastNotificationProgress.coerceIn(0, 100), lastNotificationProgress !in 0..100)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setContentIntent(pendingIntent)
@@ -715,6 +859,27 @@ class CaptionGenerationService : Service() {
         wakeLock = null
     }
 
+    private fun acquireWifiLock() {
+        if (wifiLock?.isHeld == true) return
+        val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager ?: return
+        wifiLock = wifiManager.createWifiLock(
+            WifiManager.WIFI_MODE_FULL_HIGH_PERF,
+            "$packageName:CaptionGenerationWifi"
+        ).apply {
+            setReferenceCounted(false)
+            runCatching { acquire() }
+        }
+    }
+
+    private fun releaseWifiLock() {
+        wifiLock?.let { lock ->
+            if (lock.isHeld) {
+                runCatching { lock.release() }
+            }
+        }
+        wifiLock = null
+    }
+
     private fun stopForegroundCompat() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             stopForeground(STOP_FOREGROUND_REMOVE)
@@ -733,6 +898,8 @@ class CaptionGenerationService : Service() {
         const val EXTRA_SERVICE_URL = "service_url"
         const val EXTRA_SERVICE_URLS = "service_urls"
         const val EXTRA_TASK_KIND = "task_kind"
+        const val EXTRA_TASK_ID = "task_id"
+        const val EXTRA_VIDEO_TITLE = "video_title"
         const val EXTRA_MESSAGE = "message"
         const val EXTRA_COUNT = "count"
         const val TASK_GENERATE = "generate"
@@ -747,5 +914,7 @@ class CaptionGenerationService : Service() {
         private const val PREFS_NAME = "video_english_learning"
         private const val SERVICE_URL_KEY = "whisper_service_url"
         private const val SERVICE_URL_CANDIDATES_KEY = "whisper_service_url_candidates"
+        private const val PHONE_USB_SERVICE_URL = "http://127.0.0.1:8765/transcribe"
+        private const val EMULATOR_SERVICE_URL = "http://10.0.2.2:8765/transcribe"
     }
 }

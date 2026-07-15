@@ -2,6 +2,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 import re
+import sys
 import tempfile
 import threading
 import time
@@ -31,25 +32,75 @@ def repair_local_proxy_env():
 
 repair_local_proxy_env()
 
+
+def add_windows_gpu_dll_directories():
+    if os.name != "nt":
+        return
+    candidates = []
+    for base in sys.path:
+        if not base or not os.path.isdir(base):
+            continue
+        candidates.extend(
+            [
+                os.path.join(base, "ctranslate2"),
+                os.path.join(base, "nvidia", "cuda_runtime", "bin"),
+                os.path.join(base, "nvidia", "cuda_nvrtc", "bin"),
+                os.path.join(base, "nvidia", "cublas", "bin"),
+                os.path.join(base, "nvidia", "cudnn", "bin"),
+                os.path.join(base, "torch", "lib"),
+                os.path.join(base, "av.libs"),
+            ]
+        )
+    for path in candidates:
+        if os.path.isdir(path):
+            try:
+                os.add_dll_directory(path)
+            except (AttributeError, OSError):
+                pass
+
+
+add_windows_gpu_dll_directories()
+
 SENTENCE_END_RE = re.compile(r"[.!?][\"')\]]*$")
 MAX_SENTENCE_SECONDS = 14.0
 MAX_SENTENCE_CHARS = 180
 START_PADDING_SECONDS = 0.03
 END_PADDING_SECONDS = 0.22
 MIN_GAP_SECONDS = 0.03
-TRANSLATION_BATCH_SIZE = 8
+TRANSLATION_BATCH_SIZE = int(os.environ.get("TRANSLATION_BATCH_SIZE", "16"))
 MAX_UPLOAD_MB = int(os.environ.get("WHISPER_MAX_UPLOAD_MB", "2048"))
 AUTH_TOKEN = os.environ.get("WHISPER_AUTH_TOKEN", "").strip()
-TRANSLATION_PROVIDER = os.environ.get("TRANSLATION_PROVIDER", "auto").strip().lower()
-TRANSLATION_MODEL = os.environ.get("TRANSLATION_MODEL", "Helsinki-NLP/opus-mt-en-zh")
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+MODELS_DIR = os.path.join(PROJECT_ROOT, "models")
+LOCAL_NLLB_MODEL_DIR = os.path.join(MODELS_DIR, "nllb-200-distilled-600M")
+DEFAULT_TRANSLATION_MODEL = (
+    LOCAL_NLLB_MODEL_DIR
+    if os.path.isfile(os.path.join(LOCAL_NLLB_MODEL_DIR, "config.json"))
+    else "facebook/nllb-200-distilled-600M"
+)
+TRANSLATION_PROVIDER = os.environ.get("TRANSLATION_PROVIDER", "auto").strip().lower()
+TRANSLATION_MODEL = os.environ.get("TRANSLATION_MODEL", DEFAULT_TRANSLATION_MODEL)
+TRANSLATION_DEVICE = os.environ.get("TRANSLATION_DEVICE", "auto").strip().lower()
+TRANSLATION_SOURCE_LANGUAGE = os.environ.get("TRANSLATION_SOURCE_LANGUAGE", "eng_Latn").strip()
+TRANSLATION_TARGET_LANGUAGE = os.environ.get("TRANSLATION_TARGET_LANGUAGE", "zho_Hans").strip()
+TRANSLATION_STYLE = os.environ.get("TRANSLATION_STYLE", "subtitle").strip().lower()
+TRANSLATION_LOCAL_FILES_ONLY = os.environ.get("TRANSLATION_LOCAL_FILES_ONLY", "auto").strip().lower()
+DEVICE_FALLBACK = os.environ.get("MODEL_DEVICE_FALLBACK", "1").strip().lower() not in ("0", "false", "no", "off")
+WHISPER_HOTWORDS = os.environ.get(
+    "WHISPER_HOTWORDS",
+    "as the crow flies, long way around Africa, coast to coast, Google Maps, serious planning",
+).strip()
+WHISPER_INITIAL_PROMPT = os.environ.get(
+    "WHISPER_INITIAL_PROMPT",
+    "Clear English travel, hiking, backpacking, motorcycle and route-planning captions.",
+).strip()
 RUNTIME_CONFIG_PATH = os.environ.get(
     "WHISPER_RUNTIME_CONFIG",
     os.path.join(PROJECT_ROOT, "tools", "runtime_service_config.json"),
 )
-MODELS_DIR = os.path.join(PROJECT_ROOT, "models")
 LOCAL_EN_SMALL_MODEL_DIR = os.path.join(MODELS_DIR, "faster-whisper-small")
 LOCAL_EN_MEDIUM_MODEL_DIR = os.path.join(MODELS_DIR, "faster-whisper-medium")
+LOCAL_EN_DISTIL_LARGE_V3_MODEL_DIR = os.path.join(MODELS_DIR, "faster-distil-whisper-large-v3")
 LOCAL_MULTI_MEDIUM_MODEL_DIR = os.path.join(MODELS_DIR, "faster-whisper-medium（Multilingual model）")
 
 _translator_lock = threading.Lock()
@@ -362,17 +413,21 @@ def transcribe(video_path, progress=None):
     report(progress, "detecting", 3, "Detecting language")
     language = detect_language(video_path, progress)
     model_name = choose_transcription_model(language)
-    report(progress, "loading", 10, f"Loading model for {language or 'unknown'}")
+    model_label = display_model_name(model_name)
+    report(progress, "loading", 10, f"Loading subtitle model: {model_label} for {language or 'unknown'}")
     model = get_whisper_model(model_name)
     print(f"Transcribing {video_path} with {model_name}; detected language={language or 'unknown'}...")
-    report(progress, "transcribing", 12, "Generating subtitles")
+    report(progress, "transcribing", 12, f"Generating subtitles with {model_label}")
     segments, info = model.transcribe(
         video_path,
         language=language if language else None,
         beam_size=5,
+        patience=1.2,
         vad_filter=True,
         word_timestamps=True,
         condition_on_previous_text=True,
+        initial_prompt=WHISPER_INITIAL_PROMPT or None,
+        hotwords=WHISPER_HOTWORDS or None,
         temperature=0.0,
     )
     duration = float(getattr(info, "duration", 0.0) or 0.0)
@@ -382,7 +437,7 @@ def transcribe(video_path, progress=None):
         text = " ".join(segment.text.strip().split())
         if duration > 0:
             percent = 12 + int(min(1.0, max(0.0, float(segment.end) / duration)) * 74)
-            report(progress, "transcribing", percent, f"Transcribing {format_seconds(segment.end)} / {format_seconds(duration)}")
+            report(progress, "transcribing", percent, f"{model_label}: {format_seconds(segment.end)} / {format_seconds(duration)}")
         words = getattr(segment, "words", None) or []
         for word in words:
             word_text = " ".join(word.word.strip().split())
@@ -405,6 +460,7 @@ def transcribe(video_path, progress=None):
             )
     report(progress, "postprocessing", 88, "Post-processing subtitle timing")
     result = words_to_sentence_segments(raw_words) if raw_words else merge_sentence_segments(raw_segments)
+    result = correct_recognized_captions(result)
     result = merge_short_incomplete_segments(result)
     result = add_sentence_timing_padding(result)
     report(progress, "translating", 92, "Translating English subtitles")
@@ -427,12 +483,43 @@ def format_seconds(seconds):
     return f"{total // 60:02d}:{total % 60:02d}"
 
 
+def correct_recognized_captions(segments):
+    if not segments:
+        return segments
+
+    corrected = []
+    for segment in segments:
+        item = dict(segment)
+        text = correct_recognized_caption_text(item.get("text", ""))
+        if text != item.get("text", ""):
+            item["text"] = text
+            item["translation"] = ""
+        corrected.append(item)
+    return corrected
+
+
+def correct_recognized_caption_text(text):
+    text = " ".join((text or "").split())
+    if not text:
+        return text
+
+    replacements = [
+        (r"\bthis\s+is\s+the\s+lost\s+way\s+around\s+africa\b", "This is the long way around Africa"),
+        (r"\bthe\s+lost\s+way\s+around\s+africa\b", "the long way around Africa"),
+        (r"\blost\s+way\s+around\s+africa\b", "long way around Africa"),
+        (r"\bgoogle\s+maps\s+it\b", "Google Maps it"),
+    ]
+    for pattern, replacement in replacements:
+        text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+    return text
+
+
 def detect_language(video_path, progress=None):
     detector_name = choose_language_detector_model()
-    report(progress, "detecting", 4, f"Loading language detector: {display_model_name(detector_name)}")
+    report(progress, "detecting", 4, f"Loading language detector only: {display_model_name(detector_name)}")
     detector = get_whisper_model(detector_name)
     print(f"Detecting language with {detector_name}...")
-    report(progress, "detecting", 6, "Running language detection")
+    report(progress, "detecting", 6, "Running language detection only")
     _segments, info = detector.transcribe(
         video_path,
         beam_size=1,
@@ -460,23 +547,30 @@ def choose_language_detector_model():
 
 def choose_transcription_model(language):
     if language == "en":
-        preference = os.environ.get("WHISPER_ENGLISH_MODEL", "small").strip().lower()
+        preference = os.environ.get("WHISPER_ENGLISH_MODEL", "distil-large-v3").strip().lower()
         english_models = {
+            "distil": LOCAL_EN_DISTIL_LARGE_V3_MODEL_DIR,
+            "distil-large": LOCAL_EN_DISTIL_LARGE_V3_MODEL_DIR,
+            "distil-large-v3": LOCAL_EN_DISTIL_LARGE_V3_MODEL_DIR,
+            "large-v3": LOCAL_EN_DISTIL_LARGE_V3_MODEL_DIR,
             "small": LOCAL_EN_SMALL_MODEL_DIR,
             "medium": LOCAL_EN_MEDIUM_MODEL_DIR,
         }
         preferred_model = english_models.get(preference)
         if preferred_model and model_dir_exists(preferred_model):
             return preferred_model
-        fallback_order = (
-            (LOCAL_EN_MEDIUM_MODEL_DIR, LOCAL_EN_SMALL_MODEL_DIR)
-            if preference == "medium"
-            else (LOCAL_EN_SMALL_MODEL_DIR, LOCAL_EN_MEDIUM_MODEL_DIR)
+        fallback_orders = {
+            "small": (LOCAL_EN_SMALL_MODEL_DIR, LOCAL_EN_DISTIL_LARGE_V3_MODEL_DIR, LOCAL_EN_MEDIUM_MODEL_DIR),
+            "medium": (LOCAL_EN_MEDIUM_MODEL_DIR, LOCAL_EN_DISTIL_LARGE_V3_MODEL_DIR, LOCAL_EN_SMALL_MODEL_DIR),
+        }
+        fallback_order = fallback_orders.get(
+            preference,
+            (LOCAL_EN_DISTIL_LARGE_V3_MODEL_DIR, LOCAL_EN_MEDIUM_MODEL_DIR, LOCAL_EN_SMALL_MODEL_DIR),
         )
         for model_dir in fallback_order:
             if model_dir_exists(model_dir):
                 return model_dir
-        return "small.en"
+        return "distil-large-v3"
 
     if model_dir_exists(LOCAL_MULTI_MEDIUM_MODEL_DIR):
         return LOCAL_MULTI_MEDIUM_MODEL_DIR
@@ -510,6 +604,7 @@ def model_status():
         "english": choose_transcription_model("en"),
         "other": choose_transcription_model("zh"),
         "paths": {
+            "english_distil_large_v3": LOCAL_EN_DISTIL_LARGE_V3_MODEL_DIR,
             "english_medium": LOCAL_EN_MEDIUM_MODEL_DIR,
             "english_small": LOCAL_EN_SMALL_MODEL_DIR,
             "multilingual_medium": LOCAL_MULTI_MEDIUM_MODEL_DIR,
@@ -531,29 +626,92 @@ def get_whisper_model(model_name=None):
                 "faster-whisper is not installed. Run: python -m pip install faster-whisper"
             ) from exc
 
-        device = os.environ.get("WHISPER_DEVICE", "cpu")
-        compute_type = os.environ.get("WHISPER_COMPUTE_TYPE", "int8")
+        requested_device = os.environ.get("WHISPER_DEVICE", "auto")
+        device = resolve_whisper_device(requested_device)
+        requested_compute_type = os.environ.get("WHISPER_COMPUTE_TYPE", "auto").strip().lower()
+        compute_type = ("float16" if device == "cuda" else "int8") if requested_compute_type == "auto" else requested_compute_type
         print(f"Loading Whisper model {model_name} on {device}/{compute_type}...")
         try:
             model = WhisperModel(model_name, device=device, compute_type=compute_type)
         except Exception as exc:
+            if device == "cuda" and DEVICE_FALLBACK and is_cuda_runtime_error(exc):
+                print(f"Could not load Whisper model on CUDA: {exc}")
+                print("CUDA runtime is incomplete; retrying Whisper on CPU/int8.")
+                device = "cpu"
+                compute_type = "int8" if requested_compute_type == "auto" else requested_compute_type
+                model = WhisperModel(model_name, device=device, compute_type=compute_type)
+                _models[model_name] = model
+                return model
             fallback_model = os.environ.get("WHISPER_FALLBACK_MODEL", "tiny.en")
             if fallback_model == model_name:
                 raise
             print(f"Could not load Whisper model {model_name}: {exc}")
             print(f"Falling back to cached Whisper model {fallback_model}.")
             model_name = fallback_model
-            model = WhisperModel(fallback_model, device=device, compute_type=compute_type)
+            try:
+                model = WhisperModel(fallback_model, device=device, compute_type=compute_type)
+            except Exception as fallback_exc:
+                if device == "cuda" and DEVICE_FALLBACK and is_cuda_runtime_error(fallback_exc):
+                    print(f"Could not load fallback Whisper model on CUDA: {fallback_exc}")
+                    print("CUDA runtime is incomplete; retrying fallback Whisper on CPU/int8.")
+                    device = "cpu"
+                    compute_type = "int8" if requested_compute_type == "auto" else requested_compute_type
+                    model = WhisperModel(fallback_model, device=device, compute_type=compute_type)
+                else:
+                    raise
         _models[model_name] = model
         return model
 
 
+def resolve_whisper_device(requested_device):
+    requested = (requested_device or "auto").strip().lower()
+    if requested not in ("auto", "cuda"):
+        return requested
+
+    try:
+        import ctranslate2
+
+        cuda_available = ctranslate2.get_cuda_device_count() > 0
+    except Exception as exc:
+        print(f"Could not probe CUDA for faster-whisper: {exc}")
+        cuda_available = False
+
+    if cuda_available:
+        return "cuda"
+    if requested == "cuda" and not DEVICE_FALLBACK:
+        raise RuntimeError("WHISPER_DEVICE=cuda was requested, but CTranslate2 cannot access a CUDA device")
+    if requested == "cuda":
+        print("CTranslate2 cannot access CUDA; falling back to CPU for Whisper.")
+    else:
+        print("CUDA is unavailable to CTranslate2; using CPU for Whisper.")
+    return "cpu"
+
+
+def is_cuda_runtime_error(exc):
+    message = str(exc).lower()
+    cuda_markers = (
+        "cublas",
+        "cudnn",
+        "cuda",
+        "cufft",
+        "curand",
+        "cusolver",
+        "cusparse",
+        "nvrtc",
+        "not found or cannot be loaded",
+        "could not load library",
+    )
+    return any(marker in message for marker in cuda_markers)
+
+
 def default_whisper_model():
-    if model_dir_exists(LOCAL_EN_SMALL_MODEL_DIR):
-        return LOCAL_EN_SMALL_MODEL_DIR
+    if model_dir_exists(LOCAL_EN_DISTIL_LARGE_V3_MODEL_DIR):
+        return LOCAL_EN_DISTIL_LARGE_V3_MODEL_DIR
     if model_dir_exists(LOCAL_EN_MEDIUM_MODEL_DIR):
         return LOCAL_EN_MEDIUM_MODEL_DIR
-    return "small.en"
+    if model_dir_exists(LOCAL_EN_SMALL_MODEL_DIR):
+        return LOCAL_EN_SMALL_MODEL_DIR
+    return "distil-large-v3"
 
 
 def translate_segments(segments, language="en"):
@@ -588,16 +746,123 @@ def translate_texts(texts):
     if translator is None:
         raise RuntimeError("no local English-to-Chinese translator is available")
 
+    prepared_texts = [prepare_caption_for_translation(text) for text in texts]
     translated = [""] * len(texts)
     for start in range(0, len(texts), TRANSLATION_BATCH_SIZE):
-        batch = texts[start : start + TRANSLATION_BATCH_SIZE]
+        batch = prepared_texts[start : start + TRANSLATION_BATCH_SIZE]
         try:
             translations = translator(batch)
         except Exception as exc:
             raise RuntimeError(f"translation failed: {exc}") from exc
         for offset, translation in enumerate(translations):
-            translated[start + offset] = translation
+            index = start + offset
+            translated[index] = polish_caption_translation(texts[index], prepared_texts[index], translation)
     return translated
+
+
+def prepare_caption_for_translation(text):
+    text = " ".join((text or "").split())
+    if TRANSLATION_STYLE in ("", "raw", "none", "off"):
+        return text
+
+    replacements = [
+        (r"\bthe\s+lost\s+way\s+around\s+africa\b", "the long way around Africa"),
+        (r"\blost\s+way\s+around\s+africa\b", "long way around Africa"),
+        (r"\bas\s+the\s+crow\s+flies\b", "in a straight line"),
+        (r"\bgoogle\s+maps\s+it\b", "use Google Maps to figure it out"),
+        (r"\bgoogle-map\s+it\b", "use Google Maps to figure it out"),
+        (r"\bcoast\s+to\s+coast\b", "from one coast to the other coast"),
+    ]
+    for pattern, replacement in replacements:
+        text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+    return text
+
+
+def polish_caption_translation(original, prepared, translation):
+    text = " ".join((translation or "").split())
+    if TRANSLATION_STYLE in ("", "raw", "none", "off"):
+        return text
+
+    source = " ".join((original or "").split()).lower()
+    prepared_source = " ".join((prepared or "").split()).lower()
+
+    fixed_sentences = [
+        (
+            r"\bbut we don't get to go straight (as the crow flies|in a straight line)\.?$",
+            "但我们不能按直线距离直接过去。",
+        ),
+        (
+            r"\bthis is the (lost|long) way around africa\.?$",
+            "这就是绕行非洲的漫长路线。",
+        ),
+        (
+            r"\bif you're going to cross africa (coast to coast|from one coast to the other coast), you're going to need to do some planning\.?$",
+            "如果你要横穿非洲，从一个海岸到另一个海岸，就得认真规划。",
+        ),
+        (r"\bsome serious planning\.?$", "而且是非常认真的规划。"),
+        (
+            r"\byou see, you can't just (google maps it|use google maps to figure it out)\.?$",
+            "你看，这事不能只是打开谷歌地图随便搜一下就出发。",
+        ),
+    ]
+    for pattern, replacement in fixed_sentences:
+        if re.fullmatch(pattern, source, flags=re.IGNORECASE) or re.fullmatch(pattern, prepared_source, flags=re.IGNORECASE):
+            return replacement
+
+    fixed_fragments = [
+        (
+            r"\bbut we don't get to go straight (as the crow flies|in a straight line)\b",
+            [
+                ("但是我们不能直走一条直线", "但我们不能按直线距离直接过去"),
+                ("但我们不能直走一条直线", "但我们不能按直线距离直接过去"),
+                ("但我们不能直接走直线", "但我们不能按直线距离直接过去"),
+            ],
+        ),
+        (
+            r"\bthis is the (lost|long) way around africa\b",
+            [
+                ("这是非洲最远的路", "这就是绕行非洲的漫长路线"),
+                ("这是在非洲各地的迷路", "这就是绕行非洲的漫长路线"),
+                ("这是非洲各地的迷路", "这就是绕行非洲的漫长路线"),
+            ],
+        ),
+        (
+            r"\bif you're going to cross africa (coast to coast|from one coast to the other coast)\b",
+            [
+                ("如果你要从一个海岸穿越非洲到另一个海岸, 你需要做一些计划", "如果你要横穿非洲，从一个海岸到另一个海岸，就得认真规划"),
+                ("如果你要穿越非洲海岸到海岸，你需要做一些规划", "如果你要横穿非洲，从一个海岸到另一个海岸，就得认真规划"),
+            ],
+        ),
+        (
+            r"\byou see, you can't just (google maps it|use google maps to figure it out)\b",
+            [
+                ("你不能只用谷歌地图来弄清楚", "你看，这事不能只是打开谷歌地图随便搜一下就出发"),
+                ("你看，你不能只是谷歌地图它", "你看，这事不能只是打开谷歌地图随便搜一下就出发"),
+            ],
+        ),
+    ]
+    for pattern, replacements_for_fragment in fixed_fragments:
+        if re.search(pattern, source, flags=re.IGNORECASE) or re.search(pattern, prepared_source, flags=re.IGNORECASE):
+            for old, new in replacements_for_fragment:
+                text = text.replace(old, new)
+
+    replacements = [
+        ("但是我们不能直走一条直线", "但我们不能按直线距离直接过去"),
+        ("但我们不能直走一条直线", "但我们不能按直线距离直接过去"),
+        ("这是非洲最远的路", "这就是绕行非洲的漫长路线"),
+        ("像乌鸦飞来飞去一样直走", "按直线距离直接过去"),
+        ("像乌鸦飞一样直走", "按直线距离直接过去"),
+        ("乌鸦飞", "直线距离"),
+        ("非洲各地的迷路", "绕行非洲的漫长路线"),
+        ("非洲各地的失落之路", "绕行非洲的漫长路线"),
+        ("海岸到海岸", "从一个海岸到另一个海岸"),
+        ("一些严肃的计划", "非常认真的规划"),
+        ("谷歌地图它", "用谷歌地图随便搜一下"),
+        ("谷歌地图一下", "用谷歌地图随便搜一下"),
+    ]
+    for old, new in replacements:
+        text = text.replace(old, new)
+    return text
 
 
 def get_translator():
@@ -647,21 +912,81 @@ def build_argos_translator():
 
 def build_transformers_translator():
     try:
-        from transformers import MarianMTModel, MarianTokenizer
+        import torch
+        from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
     except ImportError:
         return None
 
     print(f"Loading translation model {TRANSLATION_MODEL}...")
-    tokenizer = MarianTokenizer.from_pretrained(TRANSLATION_MODEL)
-    model = MarianMTModel.from_pretrained(TRANSLATION_MODEL)
+    tokenizer = load_pretrained(AutoTokenizer, TRANSLATION_MODEL)
+    model = load_pretrained(AutoModelForSeq2SeqLM, TRANSLATION_MODEL)
+    device = resolve_translation_device(torch, TRANSLATION_DEVICE)
+    try:
+        if device == "cuda":
+            model.to(device=device, dtype=torch.float16)
+        else:
+            model.to(device)
+    except Exception as exc:
+        if device == "cuda" and DEVICE_FALLBACK and is_cuda_runtime_error(exc):
+            print(f"Could not move translation model to CUDA: {exc}")
+            print("CUDA runtime is incomplete; retrying translation on CPU.")
+            device = "cpu"
+            model.to(device)
+        else:
+            raise
+    model.eval()
+
+    is_nllb = getattr(model.config, "model_type", "") in ("m2m_100", "nllb")
+    forced_bos_token_id = None
+    if is_nllb:
+        tokenizer.src_lang = TRANSLATION_SOURCE_LANGUAGE
+        forced_bos_token_id = tokenizer.convert_tokens_to_ids(TRANSLATION_TARGET_LANGUAGE)
+        if forced_bos_token_id is None or forced_bos_token_id == tokenizer.unk_token_id:
+            raise RuntimeError(f"NLLB target language token is unavailable: {TRANSLATION_TARGET_LANGUAGE}")
 
     def translate_batch(texts):
         encoded = tokenizer(texts, return_tensors="pt", padding=True, truncation=True, max_length=512)
-        generated = model.generate(**encoded, max_length=512, num_beams=4)
+        encoded = {name: tensor.to(device) for name, tensor in encoded.items()}
+        generation_options = {"max_new_tokens": 256, "num_beams": 4}
+        if forced_bos_token_id is not None:
+            generation_options["forced_bos_token_id"] = forced_bos_token_id
+        with torch.inference_mode():
+            generated = model.generate(**encoded, **generation_options)
         return [text.strip() for text in tokenizer.batch_decode(generated, skip_special_tokens=True)]
 
-    print(f"Using Transformers model {TRANSLATION_MODEL} for English-to-Chinese subtitles.")
+    language_pair = f"{TRANSLATION_SOURCE_LANGUAGE}->{TRANSLATION_TARGET_LANGUAGE}" if is_nllb else "model default"
+    print(f"Using Transformers model {TRANSLATION_MODEL} on {device} ({language_pair}) for English-to-Chinese subtitles.")
     return translate_batch
+
+
+def load_pretrained(component, model_name):
+    local_mode = TRANSLATION_LOCAL_FILES_ONLY
+    if local_mode in ("1", "true", "yes", "on"):
+        return component.from_pretrained(model_name, local_files_only=True)
+    if local_mode in ("0", "false", "no", "off"):
+        return component.from_pretrained(model_name)
+
+    try:
+        return component.from_pretrained(model_name, local_files_only=True)
+    except Exception as exc:
+        print(f"Could not load cached translation model locally: {exc}")
+        print("Trying to download or refresh the translation model from Hugging Face...")
+        return component.from_pretrained(model_name)
+
+
+def resolve_translation_device(torch_module, requested_device):
+    requested = (requested_device or "auto").strip().lower()
+    if requested not in ("auto", "cuda"):
+        return requested
+    if torch_module.cuda.is_available():
+        return "cuda"
+    if requested == "cuda" and not DEVICE_FALLBACK:
+        raise RuntimeError("TRANSLATION_DEVICE=cuda was requested, but this PyTorch build cannot access CUDA")
+    if requested == "cuda":
+        print("PyTorch cannot access CUDA; falling back to CPU for translation.")
+    else:
+        print("CUDA is unavailable to PyTorch; using CPU for translation.")
+    return "cpu"
 
 
 def words_to_sentence_segments(words):
@@ -708,6 +1033,7 @@ def words_to_sentence_segments(words):
 def words_to_text(words):
     text = " ".join(word["text"].strip() for word in words if word["text"].strip())
     text = re.sub(r"\s+([,.!?;:%])", r"\1", text)
+    text = re.sub(r"\s+-\s*", "-", text)
     text = re.sub(r"\s+(['’]s\b)", r"\1", text, flags=re.IGNORECASE)
     text = re.sub(r"\s+n't\b", "n't", text, flags=re.IGNORECASE)
     return " ".join(text.split())

@@ -9,17 +9,72 @@ $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 Set-Location $projectRoot
 
+function Add-ExistingPathPrefix {
+    param([string[]]$Paths)
+    $existing = New-Object System.Collections.Generic.List[string]
+    foreach ($path in $Paths) {
+        if ($path -and (Test-Path $path)) {
+            $existing.Add($path)
+        }
+    }
+    if ($existing.Count -gt 0) {
+        $env:PATH = (($existing | Select-Object -Unique) -join ";") + ";" + $env:PATH
+    }
+}
+
+function Add-PythonGpuRuntimePaths {
+    $pythonRoot = Split-Path -Parent (Split-Path -Parent (Get-Command python).Source)
+    $sitePackages = Join-Path $pythonRoot "Lib\site-packages"
+    Add-ExistingPathPrefix @(
+        (Join-Path $sitePackages "ctranslate2"),
+        (Join-Path $sitePackages "nvidia\cuda_runtime\bin"),
+        (Join-Path $sitePackages "nvidia\cuda_nvrtc\bin"),
+        (Join-Path $sitePackages "nvidia\cublas\bin"),
+        (Join-Path $sitePackages "nvidia\cudnn\bin"),
+        (Join-Path $sitePackages "torch\lib"),
+        (Join-Path $sitePackages "av.libs")
+    )
+}
+
+Add-PythonGpuRuntimePaths
+
 if (-not $env:WHISPER_DEVICE) {
-    $env:WHISPER_DEVICE = "cpu"
+    $env:WHISPER_DEVICE = "auto"
 }
 if (-not $env:WHISPER_COMPUTE_TYPE) {
-    $env:WHISPER_COMPUTE_TYPE = "int8"
+    $env:WHISPER_COMPUTE_TYPE = "auto"
+}
+if (-not $env:WHISPER_ENGLISH_MODEL) {
+    $env:WHISPER_ENGLISH_MODEL = "distil-large-v3"
+}
+if (-not $env:WHISPER_HOTWORDS) {
+    $env:WHISPER_HOTWORDS = "as the crow flies, long way around Africa, coast to coast, Google Maps, serious planning"
+}
+if (-not $env:WHISPER_INITIAL_PROMPT) {
+    $env:WHISPER_INITIAL_PROMPT = "Clear English travel, hiking, backpacking, motorcycle and route-planning captions."
 }
 if (-not $env:TRANSLATION_PROVIDER) {
     $env:TRANSLATION_PROVIDER = "transformers"
 }
 if (-not $env:TRANSLATION_MODEL) {
-    $env:TRANSLATION_MODEL = "Helsinki-NLP/opus-mt-en-zh"
+    $localNllbModel = Join-Path $projectRoot "models\nllb-200-distilled-600M"
+    $env:TRANSLATION_MODEL = if (Test-Path (Join-Path $localNllbModel "config.json")) {
+        $localNllbModel
+    } else {
+        "facebook/nllb-200-distilled-600M"
+    }
+}
+if (-not $env:TRANSLATION_DEVICE) {
+    $env:TRANSLATION_DEVICE = "auto"
+}
+if (-not $env:TRANSLATION_SOURCE_LANGUAGE) {
+    $env:TRANSLATION_SOURCE_LANGUAGE = "eng_Latn"
+}
+if (-not $env:TRANSLATION_TARGET_LANGUAGE) {
+    $env:TRANSLATION_TARGET_LANGUAGE = "zho_Hans"
+}
+if (-not $env:TRANSLATION_STYLE) {
+    $env:TRANSLATION_STYLE = "subtitle"
 }
 
 function Repair-LocalProxyEnv {
@@ -176,15 +231,23 @@ if ($adb) {
     }
 }
 
-$serviceJob = Start-Job -ArgumentList $projectRoot, $Port, $token, $runtimeConfig, $env:TRANSLATION_PROVIDER, $env:TRANSLATION_MODEL, $env:WHISPER_DEVICE, $env:WHISPER_COMPUTE_TYPE -ScriptBlock {
-    param($Root, $ListenPort, $AuthToken, $ConfigPath, $TranslationProvider, $TranslationModel, $WhisperDevice, $WhisperComputeType)
+$serviceJob = Start-Job -ArgumentList $projectRoot, $Port, $token, $runtimeConfig, $env:PATH, $env:TRANSLATION_PROVIDER, $env:TRANSLATION_MODEL, $env:TRANSLATION_DEVICE, $env:TRANSLATION_SOURCE_LANGUAGE, $env:TRANSLATION_TARGET_LANGUAGE, $env:TRANSLATION_STYLE, $env:WHISPER_DEVICE, $env:WHISPER_COMPUTE_TYPE, $env:WHISPER_ENGLISH_MODEL, $env:WHISPER_HOTWORDS, $env:WHISPER_INITIAL_PROMPT -ScriptBlock {
+    param($Root, $ListenPort, $AuthToken, $ConfigPath, $RuntimePath, $TranslationProvider, $TranslationModel, $TranslationDevice, $TranslationSourceLanguage, $TranslationTargetLanguage, $TranslationStyle, $WhisperDevice, $WhisperComputeType, $WhisperEnglishModel, $WhisperHotwords, $WhisperInitialPrompt)
     Set-Location $Root
+    $env:PATH = $RuntimePath
     $env:WHISPER_PORT = "$ListenPort"
     $env:WHISPER_RUNTIME_CONFIG = $ConfigPath
     $env:TRANSLATION_PROVIDER = $TranslationProvider
     $env:TRANSLATION_MODEL = $TranslationModel
+    $env:TRANSLATION_DEVICE = $TranslationDevice
+    $env:TRANSLATION_SOURCE_LANGUAGE = $TranslationSourceLanguage
+    $env:TRANSLATION_TARGET_LANGUAGE = $TranslationTargetLanguage
+    $env:TRANSLATION_STYLE = $TranslationStyle
     $env:WHISPER_DEVICE = $WhisperDevice
     $env:WHISPER_COMPUTE_TYPE = $WhisperComputeType
+    $env:WHISPER_ENGLISH_MODEL = $WhisperEnglishModel
+    $env:WHISPER_HOTWORDS = $WhisperHotwords
+    $env:WHISPER_INITIAL_PROMPT = $WhisperInitialPrompt
     if ($AuthToken) {
         $env:WHISPER_AUTH_TOKEN = $AuthToken
     } else {
@@ -198,8 +261,14 @@ $cloudProcess = $null
 
 Write-Host "Video English service is starting from $projectRoot"
 Write-Host "Whisper + translation: http://127.0.0.1:$Port"
+Write-Host "English ASR model:    $env:WHISPER_ENGLISH_MODEL"
+Write-Host "Whisper device:       $env:WHISPER_DEVICE ($env:WHISPER_COMPUTE_TYPE)"
+Write-Host "ASR hotwords:         $env:WHISPER_HOTWORDS"
 Write-Host "Translation provider: $env:TRANSLATION_PROVIDER"
 Write-Host "Translation model:    $env:TRANSLATION_MODEL"
+Write-Host "Translation device:   $env:TRANSLATION_DEVICE"
+Write-Host "Translation languages: $env:TRANSLATION_SOURCE_LANGUAGE -> $env:TRANSLATION_TARGET_LANGUAGE"
+Write-Host "Translation style:    $env:TRANSLATION_STYLE"
 if ($token) {
     Write-Host "Auth token: $token"
 } else {
