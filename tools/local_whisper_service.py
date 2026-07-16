@@ -223,9 +223,11 @@ class TranscribeHandler(BaseHTTPRequestHandler):
             if not isinstance(texts, list):
                 raise ValueError("texts must be a list")
             clean_texts = [str(text).strip() for text in texts]
+            print(f"POST /translate count={len(clean_texts)}", flush=True)
             translations = translate_texts(clean_texts)
             self.send_json({"translations": translations})
         except Exception as exc:
+            print(f"POST /translate failed: {exc}", flush=True)
             self.send_json({"error": f"translation failed: {exc}"}, status=500)
 
     def authorized(self, parsed):
@@ -246,8 +248,10 @@ class TranscribeHandler(BaseHTTPRequestHandler):
 
     def transcribe_and_send(self, video_path):
         try:
+            print(f"POST /transcribe sync file={video_path}", flush=True)
             segments = transcribe(video_path)
         except Exception as exc:
+            print(f"POST /transcribe failed: {exc}", flush=True)
             self.send_json({"error": str(exc)}, status=500)
             return
         self.send_json(segments)
@@ -386,12 +390,15 @@ def update_job(job_id, **changes):
 
 def run_job(job_id, video_path):
     try:
+        print(f"[job {job_id}] queued file={video_path}")
         update_job(job_id, status="running", stage="starting", progress=1, message="Preparing uploaded file")
 
         def progress(stage, percent, message):
+            print(f"[job {job_id}] {percent:03d}% {stage}: {message}", flush=True)
             update_job(job_id, status="running", stage=stage, progress=percent, message=message)
 
         result = transcribe(video_path, progress)
+        print(f"[job {job_id}] done segments={len(result)}", flush=True)
         update_job(
             job_id,
             status="done",
@@ -401,6 +408,7 @@ def run_job(job_id, video_path):
             result=result,
         )
     except Exception as exc:
+        print(f"[job {job_id}] error: {exc}", flush=True)
         update_job(job_id, status="error", stage="error", progress=100, message=str(exc), error=str(exc))
     finally:
         try:
@@ -414,6 +422,7 @@ def transcribe(video_path, progress=None):
     language = detect_language(video_path, progress)
     model_name = choose_transcription_model(language)
     model_label = display_model_name(model_name)
+    print(f"Selected subtitle model: {model_label}; detected language={language or 'unknown'}", flush=True)
     report(progress, "loading", 10, f"Loading subtitle model: {model_label} for {language or 'unknown'}")
     model = get_whisper_model(model_name)
     print(f"Transcribing {video_path} with {model_name}; detected language={language or 'unknown'}...")
@@ -470,6 +479,7 @@ def transcribe(video_path, progress=None):
 
 
 def report(callback, stage, percent, message):
+    print(f"[progress] {int(max(0, min(100, percent))):03d}% {stage}: {message}", flush=True)
     if callback is not None:
         callback(stage, int(max(0, min(100, percent))), message)
 
@@ -747,9 +757,12 @@ def translate_texts(texts):
         raise RuntimeError("no local English-to-Chinese translator is available")
 
     prepared_texts = [prepare_caption_for_translation(text) for text in texts]
+    print(f"Translating {len(texts)} subtitles with {TRANSLATION_PROVIDER}/{display_model_name(TRANSLATION_MODEL)}; batch size={TRANSLATION_BATCH_SIZE}", flush=True)
     translated = [""] * len(texts)
     for start in range(0, len(texts), TRANSLATION_BATCH_SIZE):
         batch = prepared_texts[start : start + TRANSLATION_BATCH_SIZE]
+        end = min(start + len(batch), len(texts))
+        print(f"Translation batch {start + 1}-{end}/{len(texts)}", flush=True)
         try:
             translations = translator(batch)
         except Exception as exc:

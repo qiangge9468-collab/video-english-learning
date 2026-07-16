@@ -1,4 +1,4 @@
-package com.codex.videolearnenglish
+﻿package com.codex.videolearnenglish
 
 import android.Manifest
 import android.app.AlertDialog
@@ -8,6 +8,7 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.content.res.Configuration
+import android.graphics.Bitmap
 import android.graphics.SurfaceTexture
 import android.graphics.Matrix
 import android.graphics.drawable.GradientDrawable
@@ -49,6 +50,7 @@ import com.google.mlkit.nl.translate.Translator
 import com.google.mlkit.nl.translate.TranslatorOptions
 import java.io.BufferedReader
 import java.io.File
+import java.io.FileOutputStream
 import java.io.InputStreamReader
 import java.net.HttpURLConnection
 import java.net.URL
@@ -578,7 +580,9 @@ class LearningActivity : Activity() {
         return LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(0xFFF7F8F5.toInt())
-            addView(content, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+            addView(FrameLayout(this@LearningActivity).apply {
+                addView(content, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+            }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
             addView(bottomNav(), LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(68)))
         }
     }
@@ -644,15 +648,15 @@ class LearningActivity : Activity() {
 
     private fun renderProcessingPage(parent: LinearLayout) {
         parent.removeAllViews()
-        parent.addView(pageTitle("处理中"))
+        parent.addView(pageTitle("生成字幕中"))
         parent.addView(primaryButton("＋ 添加视频") { pickBatchVideos() }, LinearLayout.LayoutParams.MATCH_PARENT, dp(48))
         val tasks = CaptionTaskStore.all(this).filter {
-            it.status == CaptionTaskStatus.QUEUED || it.status == CaptionTaskStatus.RUNNING || it.status == CaptionTaskStatus.FAILED
+            it.status == CaptionTaskStatus.QUEUED || it.status == CaptionTaskStatus.RUNNING || it.status == CaptionTaskStatus.PAUSED || it.status == CaptionTaskStatus.FAILED
         }.sortedByDescending { it.updatedAt }
         val scroll = ScrollView(this)
         val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         if (tasks.isEmpty()) {
-            list.addView(illustratedEmptyState("还没有处理中的任务。\n点“添加视频”可以一次选择多个视频生成英文字幕和中文翻译。"))
+            list.addView(illustratedEmptyState("还没有生成中的任务。\n点“添加视频”可以一次选择多个视频生成英文字幕和中文翻译。"))
         } else {
             tasks.forEach { task -> list.addView(processingTaskCard(task)) }
         }
@@ -682,11 +686,12 @@ class LearningActivity : Activity() {
         parent.addView(pageTitle("我的"))
         val scroll = ScrollView(this)
         val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        list.addView(infoCard("强哥", "作者：强哥\n版本：${versionName()}\n看视频学英语"))
-        list.addView(menuCard("使用说明", "查看视频学习、字幕生成和电脑端服务连接方法") { showUsageDialog() })
+        list.addView(authorCard())
+        list.addView(menuCard("单词本", "快速打开查词记录，按日期复习字幕里的单词和短语") { showWordbook() })
+        list.addView(menuCard("使用说明", "进入详细说明页：学习、批量生成字幕、电脑端服务、导出字幕") { showUsagePage() })
         list.addView(menuCard("电脑端服务", "运行 start_video_english_service.ps1 后，App 会优先使用 USB / 局域网 / 公网") { showServiceUrlDialog() })
-        list.addView(menuCard("GitHub", "开源项目，欢迎 star") {
-            Toast.makeText(this, "GitHub 地址请查看 README。", Toast.LENGTH_SHORT).show()
+        list.addView(menuCard("下载最新版", "打开 GitHub 项目 release 文件夹，下载作者更新的最新 APK") {
+            openGitHubProject()
         })
         list.addView(menuCard("隐私说明", "视频只会在你点击生成时上传到你自己配置的电脑端服务") { showPrivacyDialog() })
         scroll.addView(list)
@@ -699,7 +704,7 @@ class LearningActivity : Activity() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
-        top.addView(iconThumbnailPlaceholder(), LinearLayout.LayoutParams(dp(92), dp(70)))
+        top.addView(videoThumbnail(task.uri), LinearLayout.LayoutParams(dp(92), dp(70)))
         val info = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(12, 0, 0, 0)
@@ -718,8 +723,14 @@ class LearningActivity : Activity() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.END
         }
-        if (task.status == CaptionTaskStatus.FAILED) {
-            actions.addView(smallButton("重试") { retryTask(task) })
+        when (task.status) {
+            CaptionTaskStatus.RUNNING, CaptionTaskStatus.QUEUED -> actions.addView(smallButton("暂停") { pauseTask(task) })
+            CaptionTaskStatus.PAUSED -> actions.addView(smallButton("继续") { resumeTask(task) })
+            CaptionTaskStatus.FAILED -> {
+                actions.addView(smallButton("继续") { resumeTask(task) })
+                actions.addView(smallButton("重试") { retryTask(task) })
+            }
+            else -> Unit
         }
         actions.addView(smallButton("取消") { cancelTask(task) })
         card.addView(actions)
@@ -732,7 +743,7 @@ class LearningActivity : Activity() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
-        top.addView(iconThumbnailPlaceholder(), LinearLayout.LayoutParams(dp(92), dp(70)))
+        top.addView(videoThumbnail(task.uri), LinearLayout.LayoutParams(dp(92), dp(70)))
         val info = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(12, 0, 0, 0)
@@ -803,6 +814,31 @@ class LearningActivity : Activity() {
         }
     }
 
+    private fun authorCard(): View {
+        return taskCard().apply {
+            val row = LinearLayout(this@LearningActivity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            row.addView(FrameLayout(this@LearningActivity).apply {
+                background = roundedBackground(0xFFE7EFEE.toInt(), 44f)
+                clipToOutline = true
+                addView(ImageView(this@LearningActivity).apply {
+                    setImageResource(R.drawable.author_qiangge)
+                    scaleType = ImageView.ScaleType.CENTER_CROP
+                }, FrameLayout.LayoutParams(dp(88), dp(88), Gravity.CENTER))
+            }, LinearLayout.LayoutParams(dp(88), dp(88)).apply {
+                rightMargin = dp(12)
+            })
+            row.addView(LinearLayout(this@LearningActivity).apply {
+                orientation = LinearLayout.VERTICAL
+                addView(cardTitle("强哥"))
+                addView(cardMeta("作者：强哥\n版本：${versionName()}\n用真实视频练听力、查单词、复读，并生成中英双语字幕。"))
+            }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            addView(row)
+        }
+    }
+
     private fun cardTitle(value: String): TextView = TextView(this).apply {
         text = value
         textSize = 15f
@@ -848,6 +884,70 @@ class LearningActivity : Activity() {
             setImageResource(R.drawable.ic_video_tile)
             setColorFilter(0xFFFFFFFF.toInt())
         }, FrameLayout.LayoutParams(dp(42), dp(42), Gravity.CENTER))
+    }
+
+    private fun videoThumbnail(uriText: String): FrameLayout {
+        val frame = iconThumbnailPlaceholder()
+        val image = ImageView(this).apply {
+            scaleType = ImageView.ScaleType.CENTER_CROP
+            visibility = View.GONE
+        }
+        frame.addView(image, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+        val uri = runCatching { Uri.parse(uriText) }.getOrNull() ?: return frame
+        val file = thumbnailCacheFile(uri)
+        if (file.exists() && file.length() > 0L) {
+            image.setImageURI(Uri.fromFile(file))
+            image.visibility = View.VISIBLE
+            return frame
+        }
+        Thread {
+            if (generateThumbnail(uri, file)) {
+                runOnUiThread {
+                    image.setImageURI(Uri.fromFile(file))
+                    image.visibility = View.VISIBLE
+                }
+            }
+        }.start()
+        return frame
+    }
+
+    private fun generateThumbnail(uri: Uri, output: File): Boolean {
+        val retriever = MediaMetadataRetriever()
+        return try {
+            retriever.setDataSource(this, uri)
+            val bitmap = retriever.getFrameAtTime(0, MediaMetadataRetriever.OPTION_CLOSEST_SYNC) ?: return false
+            val scaled = scaleBitmapForCard(bitmap)
+            output.parentFile?.mkdirs()
+            FileOutputStream(output).use { stream ->
+                scaled.compress(Bitmap.CompressFormat.JPEG, 82, stream)
+            }
+            if (scaled !== bitmap) bitmap.recycle()
+            scaled.recycle()
+            true
+        } catch (_: Exception) {
+            false
+        } finally {
+            runCatching { retriever.release() }
+        }
+    }
+
+    private fun scaleBitmapForCard(bitmap: Bitmap): Bitmap {
+        val maxWidth = 360
+        val maxHeight = 240
+        val ratio = minOf(maxWidth / bitmap.width.toFloat(), maxHeight / bitmap.height.toFloat(), 1f)
+        if (ratio >= 1f) return bitmap
+        return Bitmap.createScaledBitmap(
+            bitmap,
+            (bitmap.width * ratio).toInt().coerceAtLeast(1),
+            (bitmap.height * ratio).toInt().coerceAtLeast(1),
+            true
+        )
+    }
+
+    private fun thumbnailCacheFile(uri: Uri): File {
+        val digest = MessageDigest.getInstance("SHA-256").digest(uri.toString().toByteArray(Charsets.UTF_8))
+        val name = digest.joinToString("") { "%02x".format(it) }
+        return File(File(cacheDir, "video_thumbnails").apply { mkdirs() }, "$name.jpg")
     }
 
     private fun illustratedEmptyState(message: String): LinearLayout = LinearLayout(this).apply {
@@ -917,7 +1017,7 @@ class LearningActivity : Activity() {
             .putExtra(CaptionGenerationService.EXTRA_VIDEO_TITLE, task.title)
             .putExtra(CaptionGenerationService.EXTRA_SERVICE_URL, currentServiceUrl())
             .putExtra(CaptionGenerationService.EXTRA_SERVICE_URLS, JSONArray(serviceUrlCandidates()).toString())
-            .putExtra(CaptionGenerationService.EXTRA_TASK_KIND, CaptionGenerationService.TASK_GENERATE)
+            .putExtra(CaptionGenerationService.EXTRA_TASK_KIND, task.taskKind.ifBlank { CaptionGenerationService.TASK_GENERATE })
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             startForegroundService(intent)
         } else {
@@ -927,8 +1027,19 @@ class LearningActivity : Activity() {
 
     private fun retryTask(task: CaptionTask) {
         val uri = Uri.parse(task.uri)
-        val queued = CaptionTaskStore.enqueue(this, uri, task.title)
+        val queued = CaptionTaskStore.enqueue(this, uri, task.title, task.taskKind.ifBlank { CaptionGenerationService.TASK_GENERATE }, resetFailures = true)
         startCaptionTaskService(queued)
+        renderCurrentTaskTab()
+    }
+
+    private fun pauseTask(task: CaptionTask) {
+        CaptionTaskStore.pause(this, task.id)
+        renderCurrentTaskTab()
+    }
+
+    private fun resumeTask(task: CaptionTask) {
+        val resumed = CaptionTaskStore.resume(this, task.id) ?: return
+        startCaptionTaskService(resumed)
         renderCurrentTaskTab()
     }
 
@@ -1021,12 +1132,62 @@ class LearningActivity : Activity() {
     private fun versionName(): String =
         runCatching { packageManager.getPackageInfo(packageName, 0).versionName ?: "2.0.0" }.getOrDefault("2.0.0")
 
+    private fun showUsagePage() {
+        val content = tabContent ?: return showUsageDialog()
+        content.removeAllViews()
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        header.addView(pageTitle("使用说明"), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        header.addView(smallButton("返回") { renderMinePage(content) }, LinearLayout.LayoutParams(dp(88), dp(38)))
+        content.addView(header)
+        val scroll = ScrollView(this)
+        val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        list.addView(infoCard("学习页", "导入或从“已完成”打开视频后，可以播放、上一句、下一句、循环、复读、早/晚 0.5 秒、切换英文/中文/双语、查单词和导出字幕。"))
+        list.addView(infoCard("生成字幕中", "点“添加视频”可以一次选择多个视频。App 会后台依次提取音频，上传到电脑端 Whisper，生成英文字幕后自动调用电脑端翻译成中文。任务失败会自动续跑数次，也可以手动暂停、继续或重试。"))
+        list.addView(infoCard("已完成", "已生成字幕的视频会集中在这里。可以开始学习、导出字幕、重新电脑端翻译或删除记录。删除时可选择只删任务记录，或连本地字幕缓存一起删除。"))
+        list.addView(infoCard("电脑端服务", "在电脑 PowerShell 运行：\ncd C:\\tmp\\video-english-learning-remote\npowershell -ExecutionPolicy Bypass -File tools/start_video_english_service.ps1\n\n手机 USB 连接时优先走 USB；同一局域网走局域网；外网/流量可走 Cloudflare 公网兜底。PowerShell 窗口不要关闭。"))
+        list.addView(infoCard("单词本", "在学习页点当前句里的单词或短语会自动保存。可在“我的 > 单词本”按日期复习，并跳回原视频例句。"))
+        list.addView(infoCard("下载最新版", "在 GitHub 的 release 文件夹下载最新 APK：\nhttps://github.com/qiangge9468-collab/video-english-learning/tree/main/release"))
+        scroll.addView(list)
+        content.addView(scroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+    }
+
     private fun showUsageDialog() {
+        val message = """
+            1. 学习页
+            导入或从“已完成”打开视频后，可以播放、上一句、下一句、循环、复读、早/晚 0.5 秒、切换英文/中文/双语、查单词和导出字幕。
+
+            2. 生成字幕中
+            点“添加视频”可以一次选择多个视频。App 会在后台依次提取音频，上传到电脑端 Whisper，生成英文字幕后自动调用电脑端翻译成中文。任务失败会自动续跑数次；你也可以点暂停、继续或重试。
+
+            3. 已完成
+            已生成字幕的视频会集中在这里。可以开始学习、导出字幕、重新电脑端翻译或删除记录。删除时可选择只删任务记录，或连本地字幕缓存一起删除。
+
+            4. 电脑端服务
+            在电脑 PowerShell 运行：
+            cd C:\tmp\video-english-learning-remote
+            powershell -ExecutionPolicy Bypass -File tools/start_video_english_service.ps1
+            手机 USB 连接时优先走 USB；同一局域网走局域网；外网/流量可走 Cloudflare 公网兜底。PowerShell 窗口不要关闭。
+
+            5. 单词本
+            在学习页点当前句里的单词或短语会自动保存。可在“我的 > 单词本”按日期复习，并跳回原视频例句。
+        """.trimIndent()
         AlertDialog.Builder(this)
             .setTitle("使用说明")
-            .setMessage("学习页用于播放、复读、查词和导出字幕。\n\n处理中页可以一次选择多个视频，后台逐个生成英文字幕并调用电脑端翻译成中文。\n\n已完成页可以开始学习、导出字幕、重新翻译或删除记录。\n\n电脑端请运行 tools/start_video_english_service.ps1。")
+            .setMessage(message)
             .setPositiveButton("知道了", null)
             .show()
+    }
+
+    private fun openGitHubProject() {
+        val url = "https://github.com/qiangge9468-collab/video-english-learning/tree/main/release"
+        runCatching {
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+        }.onFailure {
+            Toast.makeText(this, url, Toast.LENGTH_LONG).show()
+        }
     }
 
     private fun showPrivacyDialog() {
@@ -3420,7 +3581,7 @@ class LearningActivity : Activity() {
 
     private enum class MainTab(val label: String, val iconRes: Int) {
         LEARNING("学习", R.drawable.ic_tab_learning),
-        PROCESSING("处理中", R.drawable.ic_tab_processing),
+        PROCESSING("生成字幕中", R.drawable.ic_tab_processing),
         COMPLETED("已完成", R.drawable.ic_tab_completed),
         MINE("我的", R.drawable.ic_tab_mine)
     }
@@ -3439,3 +3600,6 @@ class LearningActivity : Activity() {
         }
     }
 }
+
+
+

@@ -59,7 +59,8 @@ class CaptionGenerationService : Service() {
         } ?: CaptionTaskStore.enqueue(
             this,
             videoUri,
-            intent?.getStringExtra(EXTRA_VIDEO_TITLE).orEmpty()
+            intent?.getStringExtra(EXTRA_VIDEO_TITLE).orEmpty(),
+            taskKind
         )
         if (running) {
             sendProgress("已加入字幕生成队列：${task.title}")
@@ -128,13 +129,23 @@ class CaptionGenerationService : Service() {
                     throw IllegalStateException("没有生成字幕。")
                 }
             } catch (error: Exception) {
+                if (error is TaskPausedException) {
+                    updateNotification("任务已暂停")
+                    sendProgress("任务已暂停")
+                    return@Thread
+                }
+                if (error is TaskCanceledException) {
+                    updateNotification("任务已取消")
+                    sendProgress("任务已取消")
+                    return@Thread
+                }
                 val isTranslationTask = taskKind == TASK_TRANSLATE_REMOTE || taskKind == TASK_TRANSLATE_PHONE
                 val message = buildString {
                     append(if (isTranslationTask) friendlyTranslationError(error) else friendlyGenerationError(error))
                     audioForUpload?.let { append("。已保留音频缓存：").append(formatBytes(it.file.length())).append("，下次会直接重试上传。") }
                 }
                 updateNotification(if (isTranslationTask) "中文翻译失败：$message" else "生成字幕失败：$message")
-                CaptionTaskStore.markFailed(this, task.id, message)
+                CaptionTaskStore.markFailedOrRetry(this, task.id, message, MAX_AUTO_FAILURES)
                 sendError(message, taskKind)
             } finally {
                 running = false
@@ -158,6 +169,7 @@ class CaptionGenerationService : Service() {
     }
 
     private fun progress(message: String) {
+        ensureTaskActive()
         val percent = extractPercent(message)
         percent?.let { lastNotificationProgress = it }
         val now = System.currentTimeMillis()
@@ -181,11 +193,21 @@ class CaptionGenerationService : Service() {
             .putExtra(EXTRA_TASK_ID, next.id)
             .putExtra(EXTRA_VIDEO_URI, next.uri)
             .putExtra(EXTRA_VIDEO_TITLE, next.title)
-            .putExtra(EXTRA_TASK_KIND, TASK_GENERATE)
+            .putExtra(EXTRA_TASK_KIND, next.taskKind.ifBlank { TASK_GENERATE })
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             startForegroundService(intent)
         } else {
             startService(intent)
+        }
+    }
+
+    private fun ensureTaskActive() {
+        val id = currentTaskId ?: return
+        val task = CaptionTaskStore.all(this).firstOrNull { it.id == id } ?: return
+        when (task.status) {
+            CaptionTaskStatus.PAUSED -> throw TaskPausedException()
+            CaptionTaskStatus.CANCELED -> throw TaskCanceledException()
+            else -> Unit
         }
     }
 
@@ -415,6 +437,7 @@ class CaptionGenerationService : Service() {
             audioFile.inputStream().use { input ->
                 val buffer = ByteArray(256 * 1024)
                 while (true) {
+                    ensureTaskActive()
                     val read = input.read(buffer)
                     if (read <= 0) break
                     output.write(buffer, 0, read)
@@ -448,6 +471,7 @@ class CaptionGenerationService : Service() {
             audioFile.inputStream().use { input ->
                 val buffer = ByteArray(256 * 1024)
                 while (true) {
+                    ensureTaskActive()
                     val read = input.read(buffer)
                     if (read <= 0) break
                     output.write(buffer, 0, read)
@@ -465,6 +489,7 @@ class CaptionGenerationService : Service() {
         var serviceUrl = initialServiceUrl
         var lastSwitchCheckAt = 0L
         while (true) {
+            ensureTaskActive()
             val now = System.currentTimeMillis()
             if (now - lastSwitchCheckAt >= 5_000L) {
                 lastSwitchCheckAt = now
@@ -631,6 +656,7 @@ class CaptionGenerationService : Service() {
         var start = 0
         var serviceUrl = initialServiceUrl
         while (start < texts.size) {
+            ensureTaskActive()
             val end = (start + REMOTE_TRANSLATION_BATCH_SIZE).coerceAtMost(texts.size)
             val preferred = runCatching { selectReachableServiceUrl(serviceUrls) }.getOrNull()
             if (preferred != null && preferred != serviceUrl && serviceUrlPriority(preferred) < serviceUrlPriority(serviceUrl)) {
@@ -709,6 +735,7 @@ class CaptionGenerationService : Service() {
                 translator.downloadModelIfNeeded(conditions)
             }
             return texts.mapIndexed { index, text ->
+                ensureTaskActive()
                 progress("手机端翻译中：${index + 1}/${texts.size}")
                 awaitMlKitTask<String>("手机端翻译失败") {
                     translator.translate(text)
@@ -907,6 +934,7 @@ class CaptionGenerationService : Service() {
         const val TASK_TRANSLATE_PHONE = "translate_phone"
         const val TRANSLATION_SOURCE_COMPUTER = "computer"
         const val TRANSLATION_SOURCE_PHONE = "phone"
+        private const val MAX_AUTO_FAILURES = 5
         private const val CHANNEL_ID = "caption_generation"
         private const val NOTIFICATION_ID = 42
         private const val SUBTITLE_CACHE_DIR = "subtitles_cache"
@@ -917,4 +945,7 @@ class CaptionGenerationService : Service() {
         private const val PHONE_USB_SERVICE_URL = "http://127.0.0.1:8765/transcribe"
         private const val EMULATOR_SERVICE_URL = "http://10.0.2.2:8765/transcribe"
     }
+
+    private class TaskPausedException : RuntimeException("task paused")
+    private class TaskCanceledException : RuntimeException("task canceled")
 }

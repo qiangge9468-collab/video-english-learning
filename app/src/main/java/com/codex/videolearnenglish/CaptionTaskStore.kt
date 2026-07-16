@@ -10,6 +10,7 @@ import java.security.MessageDigest
 enum class CaptionTaskStatus(val id: String) {
     QUEUED("queued"),
     RUNNING("running"),
+    PAUSED("paused"),
     DONE("done"),
     FAILED("failed"),
     CANCELED("canceled");
@@ -25,12 +26,14 @@ data class CaptionTask(
     val uri: String,
     val title: String,
     val status: CaptionTaskStatus,
+    val taskKind: String,
     val stage: String,
     val progress: Int,
     val message: String,
     val connectionLabel: String,
     val subtitleCount: Int,
     val bilingual: Boolean,
+    val failureCount: Int,
     val createdAt: Long,
     val updatedAt: Long,
     val completedAt: Long,
@@ -39,28 +42,34 @@ data class CaptionTask(
 
 object CaptionTaskStore {
     private const val FILE_NAME = "caption_tasks.json"
+    const val TASK_GENERATE = "generate"
+    const val TASK_TRANSLATE_REMOTE = "translate_remote"
+    const val TASK_TRANSLATE_PHONE = "translate_phone"
 
     @Synchronized
     fun all(context: Context): List<CaptionTask> = read(context)
 
     @Synchronized
-    fun enqueue(context: Context, uri: Uri, title: String): CaptionTask {
+    fun enqueue(context: Context, uri: Uri, title: String, taskKind: String = TASK_GENERATE, resetFailures: Boolean = true): CaptionTask {
         val now = System.currentTimeMillis()
         val id = stableId(uri.toString())
         val tasks = read(context).toMutableList()
         val existingIndex = tasks.indexOfFirst { it.id == id }
+        val existing = tasks.getOrNull(existingIndex)
         val task = CaptionTask(
             id = id,
             uri = uri.toString(),
             title = title.ifBlank { displayNameFromUri(uri) },
             status = CaptionTaskStatus.QUEUED,
+            taskKind = taskKind,
             stage = "等待中",
             progress = 0,
             message = "已加入字幕生成队列",
             connectionLabel = "",
             subtitleCount = 0,
             bilingual = false,
-            createdAt = tasks.getOrNull(existingIndex)?.createdAt ?: now,
+            failureCount = if (resetFailures) 0 else existing?.failureCount ?: 0,
+            createdAt = existing?.createdAt ?: now,
             updatedAt = now,
             completedAt = 0L,
             error = null
@@ -110,6 +119,7 @@ object CaptionTaskStore {
                 message = "已生成中英双语字幕",
                 subtitleCount = subtitleCount,
                 bilingual = true,
+                failureCount = 0,
                 updatedAt = now,
                 completedAt = now,
                 error = null
@@ -126,9 +136,41 @@ object CaptionTaskStore {
                 stage = "失败",
                 message = message,
                 error = message,
+                failureCount = it.failureCount + 1,
                 updatedAt = now
             )
         }
+    }
+
+    @Synchronized
+    fun markFailedOrRetry(context: Context, id: String, message: String, maxFailures: Int): Boolean {
+        var willRetry = false
+        val now = System.currentTimeMillis()
+        update(context, id) {
+            val failures = it.failureCount + 1
+            willRetry = failures < maxFailures
+            if (willRetry) {
+                it.copy(
+                    status = CaptionTaskStatus.QUEUED,
+                    stage = "等待续跑",
+                    progress = it.progress.coerceAtMost(99),
+                    message = "任务中断，已保留缓存，稍后自动继续（第 $failures/$maxFailures 次）。$message",
+                    failureCount = failures,
+                    updatedAt = now,
+                    error = message
+                )
+            } else {
+                it.copy(
+                    status = CaptionTaskStatus.FAILED,
+                    stage = "失败",
+                    message = "已自动重试 $maxFailures 次仍失败，请检查电脑端服务后手动重试。$message",
+                    failureCount = failures,
+                    updatedAt = now,
+                    error = message
+                )
+            }
+        }
+        return willRetry
     }
 
     @Synchronized
@@ -141,6 +183,33 @@ object CaptionTaskStore {
                 updatedAt = System.currentTimeMillis()
             )
         }
+    }
+
+    @Synchronized
+    fun pause(context: Context, id: String) {
+        update(context, id) {
+            it.copy(
+                status = CaptionTaskStatus.PAUSED,
+                stage = "已暂停",
+                message = "任务已暂停，点继续可接着处理。",
+                updatedAt = System.currentTimeMillis()
+            )
+        }
+    }
+
+    @Synchronized
+    fun resume(context: Context, id: String): CaptionTask? {
+        var resumed: CaptionTask? = null
+        update(context, id) {
+            it.copy(
+                status = CaptionTaskStatus.QUEUED,
+                stage = "等待继续",
+                message = "已加入队列，准备继续处理。",
+                updatedAt = System.currentTimeMillis(),
+                error = null
+            ).also { task -> resumed = task }
+        }
+        return resumed
     }
 
     @Synchronized
@@ -177,12 +246,14 @@ object CaptionTaskStore {
                     uri = item.optString("uri"),
                     title = item.optString("title"),
                     status = CaptionTaskStatus.from(item.optString("status")),
+                    taskKind = item.optString("taskKind", TASK_GENERATE).ifBlank { TASK_GENERATE },
                     stage = item.optString("stage"),
                     progress = item.optInt("progress", 0).coerceIn(0, 100),
                     message = item.optString("message"),
                     connectionLabel = item.optString("connectionLabel"),
                     subtitleCount = item.optInt("subtitleCount", 0),
                     bilingual = item.optBoolean("bilingual", false),
+                    failureCount = item.optInt("failureCount", 0).coerceAtLeast(0),
                     createdAt = item.optLong("createdAt", 0L),
                     updatedAt = item.optLong("updatedAt", 0L),
                     completedAt = item.optLong("completedAt", 0L),
@@ -200,12 +271,14 @@ object CaptionTaskStore {
                 put("uri", task.uri)
                 put("title", task.title)
                 put("status", task.status.id)
+                put("taskKind", task.taskKind)
                 put("stage", task.stage)
                 put("progress", task.progress)
                 put("message", task.message)
                 put("connectionLabel", task.connectionLabel)
                 put("subtitleCount", task.subtitleCount)
                 put("bilingual", task.bilingual)
+                put("failureCount", task.failureCount)
                 put("createdAt", task.createdAt)
                 put("updatedAt", task.updatedAt)
                 put("completedAt", task.completedAt)
