@@ -15,9 +15,9 @@ sys.path.insert(0, str(root / "tools"))
 import local_whisper_service as service
 
 sample = root / "third_party" / "whisper.cpp" / "samples" / "jfk.mp3"
-asr_model = root / "models" / "faster-distil-whisper-large-v3"
+asr_model = root / "models" / "faster-whisper-large-v3"
 
-print("Testing distil-large-v3 on CUDA...")
+print("Testing large-v3 on CUDA...")
 model = service.get_whisper_model(str(asr_model))
 segments, info = model.transcribe(str(sample), language="en", beam_size=1)
 text = " ".join(segment.text.strip() for segment in segments)

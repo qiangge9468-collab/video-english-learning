@@ -1,4 +1,4 @@
-﻿package com.codex.videolearnenglish
+package com.codex.videolearnenglish
 
 import android.Manifest
 import android.app.AlertDialog
@@ -256,6 +256,16 @@ class LearningActivity : Activity() {
         saveLearningState()
         clearKeepScreenOn()
         super.onPause()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (!CaptionGenerationService.isActive()) {
+            CaptionTaskStore.recoverable(this)?.let { task ->
+                startCaptionTaskService(task)
+            }
+        }
+        renderCurrentTaskTab()
     }
 
     override fun onNewIntent(intent: Intent?) {
@@ -531,7 +541,7 @@ class LearningActivity : Activity() {
         subtitleControls.addView(modeButton)
         subtitleControls.addView(loopButton)
         subtitleControls.addView(controlButton("复读") { replaySelected() })
-        val generateButton = controlButton("生成") { generateCaptions() }.apply {
+        val generateButton = controlButton("生成+") { generateCaptions() }.apply {
             setOnLongClickListener {
                 showServiceUrlDialog()
                 true
@@ -710,7 +720,7 @@ class LearningActivity : Activity() {
             setPadding(12, 0, 0, 0)
         }
         info.addView(cardTitle(task.title))
-        info.addView(cardMeta("阶段：${task.stage}"))
+        info.addView(cardMeta("\u9636\u6bb5\uff1a${task.stage}\uff5c\u603b\u8fdb\u5ea6\uff1a${task.progress.coerceIn(0, 100)}%"))
         info.addView(cardMeta(task.message.ifBlank { task.status.id }))
         top.addView(info, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         if (task.connectionLabel.isNotBlank()) top.addView(badge(task.connectionLabel))
@@ -756,6 +766,7 @@ class LearningActivity : Activity() {
         val actions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         actions.addView(smallButton("开始学习") { openCompletedTask(task) })
         actions.addView(smallButton("导出") { openCompletedTask(task, exportAfterLoad = true) })
+        actions.addView(smallButton("重生成") { showRegenerateTaskDialog(task) })
         actions.addView(smallButton("重翻") { retranslateTask(task) })
         actions.addView(smallButton("删除") { showDeleteTaskDialog(task) })
         card.addView(actions)
@@ -1057,6 +1068,28 @@ class LearningActivity : Activity() {
             saveCachedSubtitles()
             startSubtitleTranslationService(CaptionGenerationService.TASK_TRANSLATE_REMOTE)
         }, 500)
+    }
+
+    private fun showRegenerateTaskDialog(task: CaptionTask) {
+        AlertDialog.Builder(this)
+            .setTitle("重新生成双语字幕")
+            .setMessage("将重新提取音频，用电脑端 Whisper 识别全部英文，并重新翻译全部中文。旧字幕会保留到新双语字幕完整生成后再替换；锁屏后任务也会继续。")
+            .setPositiveButton("重新识别并翻译") { _, _ ->
+                val queued = CaptionTaskStore.enqueue(
+                    this,
+                    Uri.parse(task.uri),
+                    task.title,
+                    CaptionGenerationService.TASK_GENERATE,
+                    resetFailures = true
+                )
+                startCaptionTaskService(queued)
+                currentTab = MainTab.PROCESSING
+                buildUi()
+                Toast.makeText(this, "已开始重新识别并翻译，旧字幕暂时保留。", Toast.LENGTH_LONG).show()
+            }
+            .setNeutralButton("仅重翻中文") { _, _ -> retranslateTask(task) }
+            .setNegativeButton("取消", null)
+            .show()
     }
 
     private fun openCompletedTask(task: CaptionTask, exportAfterLoad: Boolean = false) {
@@ -1423,13 +1456,17 @@ class LearningActivity : Activity() {
     }
 
     private fun showLookup(term: String) {
-        val result = dictionary.lookup(term)
+        val result = dictionary.lookupRich(term)
         saveWordbookEntry(result, currentWordbookContext())
         val message = buildString {
-            if (result.phonetic.isNotBlank()) append(result.phonetic).append("\n\n")
-            append(result.meaning)
+            if (result.lemma.isNotBlank() && result.lemma != result.term) {
+                append("\u539f\u5f62\uff1a").append(result.lemma).append("\n")
+            }
+            if (result.inflection.isNotBlank()) append("\u8bcd\u5f62\uff1a").append(result.inflection).append("\n")
+            if (result.phonetic.isNotBlank()) append("\u97f3\u6807\uff1a").append(result.phonetic).append("\n\n")
+            append("\u4e2d\u6587\u91ca\u4e49\uff1a\n").append(result.meaning)
             if (result.definition.isNotBlank() && result.definition != result.meaning) {
-                append("\n\n").append(result.definition)
+                append("\n\n\u82f1\u6587\u91ca\u4e49\uff08\u524d 3 \u6761\uff09\uff1a\n").append(result.definition)
             }
         }
         val dialog = AlertDialog.Builder(this)
@@ -2164,11 +2201,21 @@ class LearningActivity : Activity() {
     }
 
     private fun generateCaptions() {
-        if (subtitles.isNotEmpty() && subtitles.any { it.chineseText.isNullOrBlank() }) {
-            translateCurrentSubtitlesWithRemoteFallback()
+        if (currentVideoUri == null) {
+            statusText.text = "请先导入或加载视频。"
             return
         }
-        startCaptionGenerationService()
+        if (subtitles.isEmpty()) {
+            startCaptionGenerationService()
+            return
+        }
+        AlertDialog.Builder(this)
+            .setTitle("更新双语字幕")
+            .setMessage("重新生成会调用电脑端 Whisper 重新识别全部英文，并同步重新翻译全部中文。旧字幕会保留到新结果完整生成后再替换。")
+            .setPositiveButton("重新识别并翻译") { _, _ -> startCaptionGenerationService() }
+            .setNeutralButton("仅重翻中文") { _, _ -> showTranslationSourceDialog() }
+            .setNegativeButton("取消", null)
+            .show()
     }
 
     private fun translateIfNeededForDisplay() {
@@ -2227,7 +2274,7 @@ class LearningActivity : Activity() {
             return
         }
         requestNotificationPermissionIfNeeded()
-        statusText.text = "已开始后台生成字幕。可以切到其他软件，完成后会自动加载字幕。"
+        statusText.text = "已开始后台识别并翻译。可以锁屏或切到其他软件，任务会在通知栏持续运行；旧字幕会在新双语字幕完成后替换。"
         val intent = Intent(this, CaptionGenerationService::class.java)
             .putExtra(CaptionGenerationService.EXTRA_VIDEO_URI, uri.toString())
             .putExtra(CaptionGenerationService.EXTRA_VIDEO_TITLE, displayName(uri))
@@ -2404,14 +2451,14 @@ class LearningActivity : Activity() {
                     statusText.text = "音频已准备：${formatMs(audio.durationMs)}，${formatBytes(audio.file.length())}，正在上传到 Whisper 服务..."
                 }
                 try {
-                    val jobId = createTranscriptJobWithRetry(serviceUrl, audio)
+                    val jobId = createTranscriptJobWithRetry(serviceUrl, audio, displayName(uri))
                     pollTranscriptJob(serviceUrl, jobId)
                 } catch (error: Exception) {
                     if (error.message.orEmpty().contains("HTTP 404")) {
                         runOnUiThread {
                             statusText.text = "服务端不支持进度任务接口，改用同步生成字幕..."
                         }
-                        requestTranscriptSync(serviceUrl, audio)
+                        requestTranscriptSync(serviceUrl, audio, displayName(uri))
                     } else {
                         throw error
                     }
@@ -2462,9 +2509,9 @@ class LearningActivity : Activity() {
         }
     }
 
-    private fun createTranscriptJobWithRetry(serviceUrl: String, audio: RemoteAudioFile): String {
+    private fun createTranscriptJobWithRetry(serviceUrl: String, audio: RemoteAudioFile, videoTitle: String): String {
         return try {
-            createTranscriptJob(serviceUrl, audio)
+            createTranscriptJob(serviceUrl, audio, videoTitle)
         } catch (first: Exception) {
             val message = first.message.orEmpty()
             if (!message.contains("unexpected end", ignoreCase = true) &&
@@ -2475,7 +2522,7 @@ class LearningActivity : Activity() {
             }
             Thread.sleep(1_500)
             ensureWhisperServiceReachable(serviceUrl)
-            createTranscriptJob(serviceUrl, audio)
+            createTranscriptJob(serviceUrl, audio, videoTitle)
         }
     }
 
@@ -2498,7 +2545,7 @@ class LearningActivity : Activity() {
         }
     }
 
-    private fun createTranscriptJob(serviceUrl: String, audio: RemoteAudioFile): String {
+    private fun createTranscriptJob(serviceUrl: String, audio: RemoteAudioFile, videoTitle: String): String {
         val audioFile = audio.file
         val url = URL(jobCreateUrl(serviceUrl))
         val totalBytes = audioFile.length().coerceAtLeast(1L)
@@ -2508,6 +2555,7 @@ class LearningActivity : Activity() {
             readTimeout = 60_000
             doOutput = true
             setRequestProperty("Content-Type", audio.mimeType)
+            setRequestProperty("X-Video-Title", URLEncoder.encode(videoTitle, Charsets.UTF_8.name()))
             setRequestProperty("Connection", "close")
             setFixedLengthStreamingMode(totalBytes)
         }
@@ -2533,7 +2581,7 @@ class LearningActivity : Activity() {
         }
     }
 
-    private fun requestTranscriptSync(serviceUrl: String, audio: RemoteAudioFile): String {
+    private fun requestTranscriptSync(serviceUrl: String, audio: RemoteAudioFile, videoTitle: String): String {
         val audioFile = audio.file
         val url = URL(serviceUrl)
         val totalBytes = audioFile.length().coerceAtLeast(1L)
@@ -2543,6 +2591,7 @@ class LearningActivity : Activity() {
             readTimeout = 30 * 60 * 1000
             doOutput = true
             setRequestProperty("Content-Type", audio.mimeType)
+            setRequestProperty("X-Video-Title", URLEncoder.encode(videoTitle, Charsets.UTF_8.name()))
             setRequestProperty("Connection", "close")
             setFixedLengthStreamingMode(totalBytes)
         }
@@ -2767,8 +2816,8 @@ class LearningActivity : Activity() {
         val ordered = linkedSetOf<String>()
         val defaultUrl = if (isRunningOnEmulator()) emulatorServiceUrl else phoneUsbServiceUrl
         val current = currentServiceUrl()
-        ordered += defaultUrl
         if (current.isNotBlank()) ordered += current
+        ordered += defaultUrl
         val saved = getSharedPreferences(prefsName, MODE_PRIVATE)
             .getString(serviceUrlCandidatesKey, null)
             .orEmpty()
@@ -2788,7 +2837,7 @@ class LearningActivity : Activity() {
     private fun serviceUrlPriority(url: String): Int {
         val lower = url.lowercase()
         return when {
-            isRunningOnEmulator() && lower.contains("10.0.2.2") -> 0
+            isRunningOnEmulator() && (lower.contains("10.0.2.2") || lower.contains("127.0.0.1")) -> 0
             !isRunningOnEmulator() && lower.contains("127.0.0.1") -> 0
             lower.startsWith("http://192.168.") || lower.startsWith("http://10.") || lower.startsWith("http://172.") -> 1
             lower.startsWith("http://") -> 2
@@ -3281,7 +3330,7 @@ class LearningActivity : Activity() {
 
     private fun parseTranscriptJson(json: String): List<SubtitleLine> {
         val array = JSONArray(json)
-        return mergeShortSubtitleFragments((0 until array.length()).mapNotNull { index ->
+        return (0 until array.length()).mapNotNull { index ->
             val body = array.optJSONObject(index) ?: return@mapNotNull null
             val start = body.optDouble("start", Double.NaN).takeIf { !it.isNaN() } ?: return@mapNotNull null
             val end = body.optDouble("end", Double.NaN).takeIf { !it.isNaN() } ?: return@mapNotNull null
@@ -3295,7 +3344,7 @@ class LearningActivity : Activity() {
                 chineseText = translation,
                 translationSource = if (translation.isNullOrBlank()) null else TranslationSource.COMPUTER.id
             )
-        })
+        }
     }
 
     private fun numberField(body: String, name: String): Double? {
@@ -3351,7 +3400,7 @@ class LearningActivity : Activity() {
                 )
             }
             if (loaded.isEmpty()) return null
-            val normalized = mergeShortSubtitleFragments(loaded)
+            val normalized = loaded.mapIndexed { index, line -> line.copy(index = index + 1) }
             subtitles.clear()
             subtitles.addAll(normalized)
             selectedIndex = selectedIndex.takeIf { it in subtitles.indices }

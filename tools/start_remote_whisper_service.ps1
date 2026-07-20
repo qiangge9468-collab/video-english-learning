@@ -31,7 +31,7 @@ if ($env:WHISPER_AUTH_TOKEN) {
 }
 Write-Host "Auto model selection:"
 Write-Host "  language detection: models\faster-whisper-small, then multilingual medium"
-Write-Host "  English captions:   models\faster-distil-whisper-large-v3, then models\faster-whisper-medium/small"
+Write-Host "  English captions:   models\faster-whisper-large-v3, then distil-large-v3/medium/small"
 Write-Host "  Other languages:    models\faster-whisper-medium (Multilingual model)"
 Write-Host "Ping: http://127.0.0.1:$listenPort/ping"
 Write-Host "LAN phone debug:"

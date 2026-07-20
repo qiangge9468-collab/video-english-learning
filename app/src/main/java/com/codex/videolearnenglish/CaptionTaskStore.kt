@@ -96,15 +96,24 @@ object CaptionTaskStore {
 
     @Synchronized
     fun updateProgress(context: Context, id: String, message: String) {
-        update(context, id) {
-            it.copy(
-                status = CaptionTaskStatus.RUNNING,
-                stage = stageFromMessage(message),
-                message = message,
-                progress = percentFromMessage(message) ?: it.progress,
-                connectionLabel = connectionFromMessage(message).ifBlank { it.connectionLabel },
-                updatedAt = System.currentTimeMillis()
-            )
+        update(context, id) { task ->
+            val connection = connectionFromMessage(message)
+            if (isConnectionOnlyMessage(message)) {
+                task.copy(
+                    status = CaptionTaskStatus.RUNNING,
+                    connectionLabel = connection.ifBlank { task.connectionLabel },
+                    updatedAt = System.currentTimeMillis()
+                )
+            } else {
+                task.copy(
+                    status = CaptionTaskStatus.RUNNING,
+                    stage = stageFromMessage(message),
+                    message = stableDisplayMessage(message),
+                    progress = percentFromMessage(message) ?: task.progress,
+                    connectionLabel = connection.ifBlank { task.connectionLabel },
+                    updatedAt = System.currentTimeMillis()
+                )
+            }
         }
     }
 
@@ -221,6 +230,13 @@ object CaptionTaskStore {
     fun queued(context: Context): CaptionTask? =
         read(context).firstOrNull { it.status == CaptionTaskStatus.QUEUED }
 
+    @Synchronized
+    fun recoverable(context: Context): CaptionTask? =
+        read(context).let { tasks ->
+            tasks.firstOrNull { it.status == CaptionTaskStatus.RUNNING }
+                ?: tasks.firstOrNull { it.status == CaptionTaskStatus.QUEUED }
+        }
+
     fun stableId(uri: String): String {
         val digest = MessageDigest.getInstance("SHA-256").digest(uri.toByteArray(Charsets.UTF_8))
         return digest.joinToString("") { "%02x".format(it) }
@@ -301,10 +317,32 @@ object CaptionTaskStore {
         Regex("""(\d+)\s*/\s*(\d+)""").find(message)?.let { match ->
             val current = match.groupValues[1].toIntOrNull() ?: return null
             val total = match.groupValues[2].toIntOrNull()?.takeIf { it > 0 } ?: return null
-            return (current * 100 / total).coerceIn(0, 100)
+            val fraction = current.toDouble() / total.toDouble()
+            return if (message.contains("翻译")) {
+                (92 + (fraction * 7).toInt()).coerceIn(92, 99)
+            } else {
+                (current * 100 / total).coerceIn(0, 100)
+            }
         }
         return null
     }
+
+    private fun isConnectionOnlyMessage(message: String): Boolean =
+        message.startsWith("已选择 Whisper 服务") ||
+            message.startsWith("检测到更稳定的连接") ||
+            message.startsWith("轮询连接中断") ||
+            message.startsWith("上传连接中断")
+
+    private fun stableDisplayMessage(message: String): String =
+        when {
+            message.startsWith("正在生成字幕") && message.contains("Translating subtitles") -> {
+                val batch = Regex("""(\d+)\s*/\s*(\d+)""").find(message)?.value.orEmpty()
+                if (batch.isNotBlank()) "正在翻译字幕：$batch" else "正在翻译字幕"
+            }
+            message.startsWith("正在生成字幕") && message.contains("Translating English subtitles") -> "正在准备翻译英文字幕"
+            message.contains("翻译模型已加载") -> message.replace("翻译模型已加载，", "")
+            else -> message
+        }
 
     private fun connectionFromMessage(message: String): String {
         return when {

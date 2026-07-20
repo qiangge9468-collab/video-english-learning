@@ -22,7 +22,11 @@ import org.json.JSONObject
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
+import java.net.URLEncoder
 import java.security.MessageDigest
+import java.nio.file.AtomicMoveNotSupportedException
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
@@ -34,6 +38,7 @@ class CaptionGenerationService : Service() {
     @Volatile private var lastNotificationProgress: Int = -1
     @Volatile private var running = false
     @Volatile private var currentTaskId: String? = null
+    @Volatile private var currentTaskKind: String = TASK_GENERATE
     @Volatile private var lastProgressMessage: String = ""
     @Volatile private var lastProgressPercent: Int = -1
     @Volatile private var lastProgressSentAtMs: Long = 0L
@@ -45,29 +50,35 @@ class CaptionGenerationService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val uriText = intent?.getStringExtra(EXTRA_VIDEO_URI)
-        val serviceUrl = intent?.getStringExtra(EXTRA_SERVICE_URL).orEmpty()
-        val serviceUrls = serviceUrlCandidates(intent, serviceUrl)
+        val effectiveIntent = intent ?: recoverableTaskIntent() ?: run {
+            stopSelf(startId)
+            return START_NOT_STICKY
+        }
+        val uriText = effectiveIntent.getStringExtra(EXTRA_VIDEO_URI)
+        val serviceUrl = effectiveIntent.getStringExtra(EXTRA_SERVICE_URL).orEmpty()
+        val serviceUrls = serviceUrlCandidates(effectiveIntent, serviceUrl)
         if (uriText.isNullOrBlank() || serviceUrls.isEmpty()) {
             stopSelf(startId)
             return START_NOT_STICKY
         }
         val videoUri = Uri.parse(uriText)
-        val taskKind = intent?.getStringExtra(EXTRA_TASK_KIND).orEmpty().ifBlank { TASK_GENERATE }
-        val task = intent?.getStringExtra(EXTRA_TASK_ID)?.takeIf { it.isNotBlank() }?.let { taskId ->
+        val taskKind = effectiveIntent.getStringExtra(EXTRA_TASK_KIND).orEmpty().ifBlank { TASK_GENERATE }
+        val task = effectiveIntent.getStringExtra(EXTRA_TASK_ID)?.takeIf { it.isNotBlank() }?.let { taskId ->
             CaptionTaskStore.all(this).firstOrNull { it.id == taskId }
         } ?: CaptionTaskStore.enqueue(
             this,
             videoUri,
-            intent?.getStringExtra(EXTRA_VIDEO_TITLE).orEmpty(),
+            effectiveIntent.getStringExtra(EXTRA_VIDEO_TITLE).orEmpty(),
             taskKind
         )
         if (running) {
-            sendProgress("已加入字幕生成队列：${task.title}")
-            return START_STICKY
+            sendProgress("字幕识别与翻译仍在后台运行：${task.title}")
+            return START_REDELIVER_INTENT
         }
         running = true
+        active = true
         currentTaskId = task.id
+        currentTaskKind = taskKind
         lastProgressMessage = ""
         lastProgressPercent = -1
         lastProgressSentAtMs = 0L
@@ -108,12 +119,12 @@ class CaptionGenerationService : Service() {
                 audioForUpload = audio
                 progress("音频已准备：${formatMs(audio.durationMs)}，${formatBytes(audio.file.length())}，正在上传到 Whisper 服务...")
                 val json = try {
-                    val jobId = createTranscriptJobWithRetry(serviceUrls, selectedServiceUrl, audio)
+                    val jobId = createTranscriptJobWithRetry(serviceUrls, selectedServiceUrl, audio, task.title)
                     pollTranscriptJob(serviceUrls, selectedServiceUrl, jobId)
                 } catch (error: Exception) {
                     if (error.message.orEmpty().contains("HTTP 404")) {
                         progress("服务端不支持进度任务接口，改用同步生成字幕...")
-                        requestTranscriptSync(selectedServiceUrl, audio)
+                        requestTranscriptSync(selectedServiceUrl, audio, task.title)
                     } else {
                         throw error
                     }
@@ -149,20 +160,23 @@ class CaptionGenerationService : Service() {
                 sendError(message, taskKind)
             } finally {
                 running = false
+                active = false
                 currentTaskId = null
                 releaseWakeLock()
                 releaseWifiLock()
-                startNextQueuedTask()
-                stopForegroundCompat()
-                stopSelf(startId)
+                if (!startNextQueuedTask()) {
+                    stopForegroundCompat()
+                    stopSelf()
+                }
             }
         }.start()
-        return START_STICKY
+        return START_REDELIVER_INTENT
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
+        active = false
         releaseWakeLock()
         releaseWifiLock()
         super.onDestroy()
@@ -187,8 +201,8 @@ class CaptionGenerationService : Service() {
         sendProgress(message)
     }
 
-    private fun startNextQueuedTask() {
-        val next = CaptionTaskStore.queued(this) ?: return
+    private fun startNextQueuedTask(): Boolean {
+        val next = CaptionTaskStore.queued(this) ?: return false
         val intent = Intent(this, CaptionGenerationService::class.java)
             .putExtra(EXTRA_TASK_ID, next.id)
             .putExtra(EXTRA_VIDEO_URI, next.uri)
@@ -199,6 +213,16 @@ class CaptionGenerationService : Service() {
         } else {
             startService(intent)
         }
+        return true
+    }
+
+    private fun recoverableTaskIntent(): Intent? {
+        val task = CaptionTaskStore.recoverable(this) ?: return null
+        return Intent(this, CaptionGenerationService::class.java)
+            .putExtra(EXTRA_TASK_ID, task.id)
+            .putExtra(EXTRA_VIDEO_URI, task.uri)
+            .putExtra(EXTRA_VIDEO_TITLE, task.title)
+            .putExtra(EXTRA_TASK_KIND, task.taskKind.ifBlank { TASK_GENERATE })
     }
 
     private fun ensureTaskActive() {
@@ -218,7 +242,12 @@ class CaptionGenerationService : Service() {
         Regex("""(\d+)\s*/\s*(\d+)""").find(message)?.let { match ->
             val current = match.groupValues[1].toIntOrNull() ?: return null
             val total = match.groupValues[2].toIntOrNull()?.takeIf { it > 0 } ?: return null
-            return (current * 100 / total).coerceIn(0, 100)
+            val fraction = current.toDouble() / total.toDouble()
+            return if (message.contains("Translat", ignoreCase = true) || message.contains("\u7ffb\u8bd1")) {
+                (92 + (fraction * 7).toInt()).coerceIn(92, 99)
+            } else {
+                (current * 100 / total).coerceIn(0, 100)
+            }
         }
         return null
     }
@@ -269,7 +298,6 @@ class CaptionGenerationService : Service() {
 
     private fun serviceUrlCandidates(intent: Intent?, primaryUrl: String): List<String> {
         val ordered = linkedSetOf<String>()
-        ordered += if (isRunningOnEmulator()) EMULATOR_SERVICE_URL else PHONE_USB_SERVICE_URL
         val raw = intent?.getStringExtra(EXTRA_SERVICE_URLS).orEmpty()
         runCatching {
             val array = JSONArray(raw)
@@ -279,6 +307,7 @@ class CaptionGenerationService : Service() {
             }
         }
         if (primaryUrl.isNotBlank()) ordered += primaryUrl
+        ordered += if (isRunningOnEmulator()) EMULATOR_SERVICE_URL else PHONE_USB_SERVICE_URL
         val saved = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
             .getString(SERVICE_URL_CANDIDATES_KEY, null)
             .orEmpty()
@@ -327,7 +356,7 @@ class CaptionGenerationService : Service() {
     private fun serviceUrlPriority(url: String): Int {
         val lower = url.lowercase()
         return when {
-            isRunningOnEmulator() && lower.contains("10.0.2.2") -> 0
+            isRunningOnEmulator() && (lower.contains("10.0.2.2") || lower.contains("127.0.0.1")) -> 0
             !isRunningOnEmulator() && lower.contains("127.0.0.1") -> 0
             lower.startsWith("http://192.168.") || lower.startsWith("http://10.") || lower.startsWith("http://172.") -> 1
             lower.startsWith("http://") -> 2
@@ -399,10 +428,10 @@ class CaptionGenerationService : Service() {
         }
     }
 
-    private fun createTranscriptJobWithRetry(serviceUrls: List<String>, initialServiceUrl: String, audio: RemoteAudioFile): String {
+    private fun createTranscriptJobWithRetry(serviceUrls: List<String>, initialServiceUrl: String, audio: RemoteAudioFile, videoTitle: String): String {
         var serviceUrl = initialServiceUrl
         return try {
-            createTranscriptJob(serviceUrl, audio)
+            createTranscriptJob(serviceUrl, audio, videoTitle)
         } catch (first: Exception) {
             val message = first.message.orEmpty()
             if (!message.contains("unexpected end", ignoreCase = true) &&
@@ -415,11 +444,11 @@ class CaptionGenerationService : Service() {
             serviceUrl = selectReachableServiceUrl(serviceUrls)
             progress("上传连接中断，已切换到${serviceLabel(serviceUrl)}重试上传...")
             ensureWhisperServiceReachable(serviceUrl)
-            createTranscriptJob(serviceUrl, audio)
+            createTranscriptJob(serviceUrl, audio, videoTitle)
         }
     }
 
-    private fun createTranscriptJob(serviceUrl: String, audio: RemoteAudioFile): String {
+    private fun createTranscriptJob(serviceUrl: String, audio: RemoteAudioFile, videoTitle: String): String {
         val audioFile = audio.file
         val url = URL(jobCreateUrl(serviceUrl))
         val totalBytes = audioFile.length().coerceAtLeast(1L)
@@ -429,6 +458,7 @@ class CaptionGenerationService : Service() {
             readTimeout = 60_000
             doOutput = true
             setRequestProperty("Content-Type", audio.mimeType)
+            setRequestProperty("X-Video-Title", URLEncoder.encode(videoTitle, Charsets.UTF_8.name()))
             setRequestProperty("Connection", "close")
             setFixedLengthStreamingMode(totalBytes)
         }
@@ -453,7 +483,7 @@ class CaptionGenerationService : Service() {
         }
     }
 
-    private fun requestTranscriptSync(serviceUrl: String, audio: RemoteAudioFile): String {
+    private fun requestTranscriptSync(serviceUrl: String, audio: RemoteAudioFile, videoTitle: String): String {
         val audioFile = audio.file
         val url = URL(serviceUrl)
         val totalBytes = audioFile.length().coerceAtLeast(1L)
@@ -463,6 +493,7 @@ class CaptionGenerationService : Service() {
             readTimeout = 30 * 60 * 1000
             doOutput = true
             setRequestProperty("Content-Type", audio.mimeType)
+            setRequestProperty("X-Video-Title", URLEncoder.encode(videoTitle, Charsets.UTF_8.name()))
             setRequestProperty("Connection", "close")
             setFixedLengthStreamingMode(totalBytes)
         }
@@ -587,24 +618,29 @@ class CaptionGenerationService : Service() {
     private fun saveCachedSubtitles(uri: Uri, transcriptJson: String): Int {
         val transcript = JSONArray(transcriptJson)
         val cache = JSONArray()
+        var missingTranslations = 0
         for (i in 0 until transcript.length()) {
             val item = transcript.optJSONObject(i) ?: continue
             val start = item.optDouble("start", Double.NaN)
             val end = item.optDouble("end", Double.NaN)
             val text = item.optString("text").takeIf { it.isNotBlank() } ?: continue
             if (start.isNaN() || end.isNaN()) continue
+            val translation = item.optString("translation").trim()
+            if (translation.isBlank()) missingTranslations += 1
             cache.put(JSONObject().apply {
                 put("index", cache.length() + 1)
                 put("startMs", (start * 1000).toInt())
                 put("endMs", (end * 1000).toInt())
                 put("englishText", text)
-                put("chineseText", item.optString("translation").takeIf { it.isNotBlank() } ?: JSONObject.NULL)
-                put("translationSource", if (item.optString("translation").isNotBlank()) TRANSLATION_SOURCE_COMPUTER else JSONObject.NULL)
+                put("chineseText", translation.takeIf { it.isNotBlank() } ?: JSONObject.NULL)
+                put("translationSource", if (translation.isNotBlank()) TRANSLATION_SOURCE_COMPUTER else JSONObject.NULL)
             })
         }
-        if (cache.length() > 0) {
-            subtitleCacheFile(uri).writeText(cache.toString(), Charsets.UTF_8)
+        if (cache.length() == 0) return 0
+        if (missingTranslations > 0) {
+            error("新英文字幕中有 $missingTranslations 句没有中文翻译，旧字幕已保留，请检查电脑端翻译模型后重试。")
         }
+        writeSubtitleCacheAtomically(subtitleCacheFile(uri), cache)
         return cache.length()
     }
 
@@ -632,6 +668,8 @@ class CaptionGenerationService : Service() {
             requestPhoneTranslations(texts)
         }
         if (translations.size != texts.size) error("翻译结果数量不一致：${translations.size}/${texts.size}")
+        val blankTranslations = translations.count { it.isBlank() }
+        if (blankTranslations > 0) error("有 $blankTranslations 句没有得到中文翻译，原字幕已保留。")
         val source = if (taskKind == TASK_TRANSLATE_REMOTE) TRANSLATION_SOURCE_COMPUTER else TRANSLATION_SOURCE_PHONE
         var updated = 0
         indices.forEachIndexed { position, itemIndex ->
@@ -647,8 +685,26 @@ class CaptionGenerationService : Service() {
                 progress("${label}翻译中：${position + 1}/${indices.size}")
             }
         }
-        file.writeText(array.toString(), Charsets.UTF_8)
+        writeSubtitleCacheAtomically(file, array)
         return updated
+    }
+
+    private fun writeSubtitleCacheAtomically(file: File, array: JSONArray) {
+        file.parentFile?.mkdirs()
+        val temporary = File(file.parentFile, "${file.name}.new")
+        temporary.writeText(array.toString(), Charsets.UTF_8)
+        try {
+            Files.move(
+                temporary.toPath(),
+                file.toPath(),
+                StandardCopyOption.REPLACE_EXISTING,
+                StandardCopyOption.ATOMIC_MOVE
+            )
+        } catch (_: AtomicMoveNotSupportedException) {
+            Files.move(temporary.toPath(), file.toPath(), StandardCopyOption.REPLACE_EXISTING)
+        } finally {
+            temporary.delete()
+        }
     }
 
     private fun requestRemoteTranslations(serviceUrls: List<String>, initialServiceUrl: String, texts: List<String>): List<String> {
@@ -855,12 +911,13 @@ class CaptionGenerationService : Service() {
         }
         return builder
             .setSmallIcon(android.R.drawable.stat_sys_upload)
-            .setContentTitle("正在生成字幕")
+            .setContentTitle(if (currentTaskKind == TASK_GENERATE) "正在识别并翻译字幕" else "正在翻译字幕")
             .setContentText(message)
             .setStyle(Notification.BigTextStyle().bigText(message))
             .setProgress(100, lastNotificationProgress.coerceIn(0, 100), lastNotificationProgress !in 0..100)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
+            .setCategory(Notification.CATEGORY_PROGRESS)
             .setContentIntent(pendingIntent)
             .build()
     }
@@ -873,7 +930,7 @@ class CaptionGenerationService : Service() {
             "$packageName:CaptionGeneration"
         ).apply {
             setReferenceCounted(false)
-            acquire(3 * 60 * 60 * 1000L)
+            acquire()
         }
     }
 
@@ -917,6 +974,10 @@ class CaptionGenerationService : Service() {
     }
 
     companion object {
+        @Volatile private var active = false
+
+        fun isActive(): Boolean = active
+
         const val ACTION_PROGRESS = "com.codex.videolearnenglish.CAPTION_PROGRESS"
         const val ACTION_DONE = "com.codex.videolearnenglish.CAPTION_DONE"
         const val ACTION_TRANSLATION_DONE = "com.codex.videolearnenglish.TRANSLATION_DONE"
