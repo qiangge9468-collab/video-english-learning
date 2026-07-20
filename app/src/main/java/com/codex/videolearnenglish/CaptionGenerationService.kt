@@ -63,13 +63,16 @@ class CaptionGenerationService : Service() {
         }
         val videoUri = Uri.parse(uriText)
         val taskKind = effectiveIntent.getStringExtra(EXTRA_TASK_KIND).orEmpty().ifBlank { TASK_GENERATE }
+        val requestedForceTranscribe = effectiveIntent.takeIf { it.hasExtra(EXTRA_FORCE_TRANSCRIBE) }
+            ?.getBooleanExtra(EXTRA_FORCE_TRANSCRIBE, false)
         val task = effectiveIntent.getStringExtra(EXTRA_TASK_ID)?.takeIf { it.isNotBlank() }?.let { taskId ->
             CaptionTaskStore.all(this).firstOrNull { it.id == taskId }
         } ?: CaptionTaskStore.enqueue(
             this,
             videoUri,
             effectiveIntent.getStringExtra(EXTRA_VIDEO_TITLE).orEmpty(),
-            taskKind
+            taskKind,
+            forceTranscribe = requestedForceTranscribe
         )
         if (running) {
             sendProgress("字幕识别与翻译仍在后台运行：${task.title}")
@@ -91,40 +94,30 @@ class CaptionGenerationService : Service() {
             var success = false
             var audioForUpload: RemoteAudioFile? = null
             try {
-                if (taskKind == TASK_TRANSLATE_REMOTE || taskKind == TASK_TRANSLATE_PHONE) {
+                if (taskKind == TASK_TRANSLATE_PHONE) {
                     val count = translateCachedSubtitles(videoUri, serviceUrls, taskKind)
                     success = count > 0
                     if (success) {
-                        val label = if (taskKind == TASK_TRANSLATE_REMOTE) "电脑端" else "手机端"
-                        progress("已用${label}完成 $count 句中文翻译。")
+                        progress("已用手机端完成 $count 句中文翻译。")
                         CaptionTaskStore.markDone(this, task.id, count)
-                        sendTranslationDone(videoUri.toString(), count, label)
+                        sendTranslationDone(videoUri.toString(), count, "手机端")
                     } else {
                         throw IllegalStateException("没有可翻译的英文字幕。")
                     }
                     return@Thread
                 }
 
-                val selectedServiceUrl = selectReachableServiceUrl(serviceUrls)
-                progress("Whisper 服务已连接，正在从视频中提取音频...")
-                val audio = onDeviceWhisper.extractAudioForRemoteUpload(videoUri) { percent ->
-                    val bounded = percent.coerceIn(0, 100)
-                    val stage = when {
-                        bounded < 75 -> "正在提取音频"
-                        bounded < 100 -> "正在压缩音频"
-                        else -> "音频准备完成"
-                    }
-                    progress("$stage：$bounded%")
-                }
-                audioForUpload = audio
-                progress("音频已准备：${formatMs(audio.durationMs)}，${formatBytes(audio.file.length())}，正在上传到 Whisper 服务...")
+                val selectedServiceUrl = waitForReachableService(task.id, serviceUrls, task.progress)
+                val mode = if (taskKind == TASK_TRANSLATE_REMOTE) "retranslate" else "generate"
                 val json = try {
-                    val jobId = createTranscriptJobWithRetry(serviceUrls, selectedServiceUrl, audio, task.title)
-                    pollTranscriptJob(serviceUrls, selectedServiceUrl, jobId)
+                    runDurableComputerTask(task, videoUri, serviceUrls, selectedServiceUrl, mode)
                 } catch (error: Exception) {
-                    if (error.message.orEmpty().contains("HTTP 404")) {
-                        progress("服务端不支持进度任务接口，改用同步生成字幕...")
-                        requestTranscriptSync(selectedServiceUrl, audio, task.title)
+                    if (error.message.orEmpty().contains("HTTP 404") && mode == "generate") {
+                        progress("电脑端服务版本较旧，改用兼容上传模式...")
+                        val audio = onDeviceWhisper.extractAudioForRemoteUpload(videoUri)
+                        audioForUpload = audio
+                        val jobId = createTranscriptJobWithRetry(serviceUrls, selectedServiceUrl, audio, task.title)
+                        pollTranscriptJob(serviceUrls, selectedServiceUrl, jobId, task.id, mode)
                     } else {
                         throw error
                     }
@@ -135,7 +128,11 @@ class CaptionGenerationService : Service() {
                     onDeviceWhisper.deleteCachedRemoteAudio(videoUri)
                     progress("已生成并缓存 $count 条字幕。")
                     CaptionTaskStore.markDone(this, task.id, count)
-                    sendDone(videoUri.toString(), count)
+                    if (taskKind == TASK_TRANSLATE_REMOTE) {
+                        sendTranslationDone(videoUri.toString(), count, "电脑端")
+                    } else {
+                        sendDone(videoUri.toString(), count)
+                    }
                 } else {
                     throw IllegalStateException("没有生成字幕。")
                 }
@@ -414,6 +411,28 @@ class CaptionGenerationService : Service() {
         }
     }
 
+    private fun waitForReachableService(taskId: String, serviceUrls: List<String>, progress: Int): String {
+        var retryDelayMs = 2_000L
+        val fallback = serviceUrls.firstOrNull().orEmpty()
+        while (true) {
+            ensureTaskActive()
+            try {
+                return selectReachableServiceUrl(serviceUrls)
+            } catch (_: Exception) {
+                val waitSeconds = (retryDelayMs / 1000L).coerceAtLeast(1L)
+                remoteTaskProgress(
+                    taskId,
+                    "等待连接电脑",
+                    progress.coerceIn(0, 99),
+                    "手机暂时无法连接电脑，${waitSeconds}秒后自动重试；已提交的电脑任务不会中止。",
+                    fallback
+                )
+                Thread.sleep(retryDelayMs)
+                retryDelayMs = (retryDelayMs * 2).coerceAtMost(60_000L)
+            }
+        }
+    }
+
     private fun ensureWhisperServiceReachable(serviceUrl: String) {
         try {
             requestJobJson(URL(pingUrl(serviceUrl)))
@@ -426,6 +445,333 @@ class CaptionGenerationService : Service() {
                     "同一局域网用电脑 Wi-Fi IP，例如 http://192.168.0.133:8765/transcribe。原始错误：${error.message}"
             )
         }
+    }
+
+    private fun runDurableComputerTask(
+        initialTask: CaptionTask,
+        videoUri: Uri,
+        serviceUrls: List<String>,
+        initialServiceUrl: String,
+        mode: String
+    ): String {
+        var task = CaptionTaskStore.all(this).firstOrNull { it.id == initialTask.id } ?: initialTask
+        if (task.remoteJobId.isNotBlank()) {
+            return pollTranscriptJob(serviceUrls, initialServiceUrl, task.remoteJobId, task.id, mode)
+        }
+
+        var serviceUrl = initialServiceUrl
+        val upload = ensureDurableUpload(task, videoUri, serviceUrls, serviceUrl)
+        serviceUrl = upload.serviceUrl
+        task = CaptionTaskStore.all(this).firstOrNull { it.id == task.id } ?: task
+        val segments = if (mode == "retranslate") cachedSegmentsForServer(videoUri) else null
+        val submitted = completeDurableUploadWithReconnect(
+            task.id,
+            serviceUrls,
+            serviceUrl,
+            upload.uploadId,
+            task.title,
+            mode,
+            force = mode == "generate" && task.forceTranscribe,
+            segments = segments
+        )
+        serviceUrl = submitted.first
+        val jobId = submitted.second
+        CaptionTaskStore.recordRemoteJob(this, task.id, jobId)
+        return pollTranscriptJob(serviceUrls, serviceUrl, jobId, task.id, mode)
+    }
+
+    private data class DurableUpload(
+        val uploadId: String,
+        val audioHash: String,
+        val offset: Long,
+        val totalBytes: Long,
+        val serviceUrl: String
+    )
+
+    private fun ensureDurableUpload(
+        initialTask: CaptionTask,
+        videoUri: Uri,
+        serviceUrls: List<String>,
+        initialServiceUrl: String
+    ): DurableUpload {
+        var task = initialTask
+        var audio: RemoteAudioFile? = null
+        var audioHash = task.audioHash
+        var totalBytes = task.totalBytes
+        var serviceUrl = initialServiceUrl
+
+        if (audioHash.isBlank() || totalBytes <= 0L) {
+            progress("正在准备可复用音频文件...")
+            audio = onDeviceWhisper.extractAudioForRemoteUpload(videoUri) { percent ->
+                val overall = (percent.coerceIn(0, 100) * 10 / 100).coerceIn(0, 10)
+                progress("正在提取音频：$overall%（本阶段 $percent%）")
+            }
+            audioHash = sha256File(audio.file) { percent ->
+                val overall = 8 + percent.coerceIn(0, 100) * 2 / 100
+                progress("正在校验音频指纹：$overall%")
+            }
+            totalBytes = audio.file.length()
+        }
+
+        val recoveredSession = createUploadSessionWithReconnect(
+            task.id,
+            serviceUrls,
+            serviceUrl,
+            audioHash,
+            totalBytes,
+            audio?.mimeType ?: "audio/mp4",
+            task.title
+        )
+        serviceUrl = recoveredSession.first
+        var session = recoveredSession.second
+        var uploadId = session.optString("upload_id").ifBlank { audioHash }
+        var offset = session.optLong("offset", 0L).coerceIn(0L, totalBytes)
+        CaptionTaskStore.recordUpload(this, task.id, audioHash, uploadId, offset, totalBytes)
+        if (session.optBoolean("complete", false) || offset >= totalBytes) {
+            remoteTaskProgress(task.id, "音频已在电脑缓存", 30, "电脑端已存在相同音频，跳过上传。", serviceUrl)
+            return DurableUpload(uploadId, audioHash, totalBytes, totalBytes, serviceUrl)
+        }
+
+        if (audio == null) {
+            progress("电脑端缺少缓存，正在重新读取手机音频...")
+            audio = onDeviceWhisper.extractAudioForRemoteUpload(videoUri)
+            val actualHash = sha256File(audio.file)
+            if (actualHash != audioHash || audio.file.length() != totalBytes) {
+                audioHash = actualHash
+                totalBytes = audio.file.length()
+                session = createUploadSession(serviceUrl, audioHash, totalBytes, audio.mimeType, task.title)
+                uploadId = session.optString("upload_id").ifBlank { audioHash }
+                offset = session.optLong("offset", 0L).coerceIn(0L, totalBytes)
+            }
+        }
+
+        val file = checkNotNull(audio).file
+        while (offset < totalBytes) {
+            ensureTaskActive()
+            val length = minOf(UPLOAD_CHUNK_BYTES.toLong(), totalBytes - offset).toInt()
+            try {
+                session = uploadChunk(serviceUrl, uploadId, file, offset, length)
+                offset = session.optLong("offset", offset + length).coerceIn(0L, totalBytes)
+            } catch (error: Exception) {
+                if (error.message.orEmpty().contains("HTTP 404")) throw error
+                val recovered = createUploadSessionWithReconnect(
+                    task.id,
+                    serviceUrls,
+                    serviceUrl,
+                    audioHash,
+                    totalBytes,
+                    audio.mimeType,
+                    task.title
+                )
+                serviceUrl = recovered.first
+                session = recovered.second
+                uploadId = session.optString("upload_id").ifBlank { audioHash }
+                offset = session.optLong("offset", offset).coerceIn(0L, totalBytes)
+                CaptionTaskStore.recordUpload(this, task.id, audioHash, uploadId, offset, totalBytes)
+                remoteTaskProgress(
+                    task.id,
+                    "等待续传",
+                    10 + (if (totalBytes > 0L) (offset * 20 / totalBytes).toInt() else 0),
+                    "连接已恢复，将从 ${formatBytes(offset)} 继续上传。",
+                    serviceUrl
+                )
+                continue
+            }
+            CaptionTaskStore.recordUpload(this, task.id, audioHash, uploadId, offset, totalBytes)
+            val uploadPercent = if (totalBytes > 0) (offset * 100 / totalBytes).toInt() else 0
+            val overall = 10 + uploadPercent * 20 / 100
+            remoteTaskProgress(
+                task.id,
+                "上传音频",
+                overall,
+                "正在断点上传：$uploadPercent%（${formatBytes(offset)} / ${formatBytes(totalBytes)}）",
+                serviceUrl
+            )
+        }
+        return DurableUpload(uploadId, audioHash, offset, totalBytes, serviceUrl)
+    }
+
+    private fun createUploadSession(
+        serviceUrl: String,
+        audioHash: String,
+        totalBytes: Long,
+        mimeType: String,
+        videoTitle: String
+    ): JSONObject {
+        val payload = JSONObject().apply {
+            put("audio_hash", audioHash)
+            put("total_bytes", totalBytes)
+            put("mime_type", mimeType)
+            put("video_title", videoTitle)
+        }
+        return JSONObject(postJson(uploadCollectionUrl(serviceUrl), payload))
+    }
+
+    private fun createUploadSessionWithReconnect(
+        taskId: String,
+        serviceUrls: List<String>,
+        initialServiceUrl: String,
+        audioHash: String,
+        totalBytes: Long,
+        mimeType: String,
+        videoTitle: String
+    ): Pair<String, JSONObject> {
+        var serviceUrl = initialServiceUrl
+        while (true) {
+            ensureTaskActive()
+            try {
+                return serviceUrl to createUploadSession(serviceUrl, audioHash, totalBytes, mimeType, videoTitle)
+            } catch (error: Exception) {
+                if (error.message.orEmpty().contains("HTTP 404")) throw error
+                serviceUrl = waitForReachableService(taskId, serviceUrls, 10)
+            }
+        }
+    }
+
+    private fun uploadChunk(
+        serviceUrl: String,
+        uploadId: String,
+        file: File,
+        offset: Long,
+        length: Int
+    ): JSONObject {
+        val connection = (URL(uploadItemUrl(serviceUrl, uploadId)).openConnection() as HttpURLConnection).apply {
+            requestMethod = "PUT"
+            connectTimeout = 15_000
+            readTimeout = 60_000
+            doOutput = true
+            setRequestProperty("Content-Type", "application/octet-stream")
+            setRequestProperty("X-Upload-Offset", offset.toString())
+            setRequestProperty("Connection", "close")
+            setFixedLengthStreamingMode(length)
+        }
+        file.inputStream().use { input ->
+            input.channel.position(offset)
+            connection.outputStream.use { output ->
+                var remaining = length
+                val buffer = ByteArray(256 * 1024)
+                while (remaining > 0) {
+                    ensureTaskActive()
+                    val read = input.read(buffer, 0, minOf(buffer.size, remaining))
+                    if (read <= 0) error("读取音频分块失败")
+                    output.write(buffer, 0, read)
+                    remaining -= read
+                }
+            }
+        }
+        return JSONObject(requestJobJson(connection))
+    }
+
+    private fun completeDurableUpload(
+        serviceUrl: String,
+        uploadId: String,
+        videoTitle: String,
+        mode: String,
+        force: Boolean,
+        segments: JSONArray?
+    ): String {
+        val payload = JSONObject().apply {
+            put("video_title", videoTitle)
+            put("mode", mode)
+            put("force", force)
+            if (segments != null) put("segments", segments)
+        }
+        val response = JSONObject(postJson(uploadCompleteUrl(serviceUrl, uploadId), payload))
+        return response.optString("job_id").ifBlank { error("电脑端没有返回 job_id：$response") }
+    }
+
+    private fun completeDurableUploadWithReconnect(
+        taskId: String,
+        serviceUrls: List<String>,
+        initialServiceUrl: String,
+        uploadId: String,
+        videoTitle: String,
+        mode: String,
+        force: Boolean,
+        segments: JSONArray?
+    ): Pair<String, String> {
+        var serviceUrl = initialServiceUrl
+        while (true) {
+            ensureTaskActive()
+            try {
+                return serviceUrl to completeDurableUpload(serviceUrl, uploadId, videoTitle, mode, force, segments)
+            } catch (error: Exception) {
+                if (error.message.orEmpty().contains("HTTP 404")) throw error
+                serviceUrl = waitForReachableService(taskId, serviceUrls, 30)
+            }
+        }
+    }
+
+    private fun cachedSegmentsForServer(uri: Uri): JSONArray {
+        val file = subtitleCacheFile(uri)
+        if (!file.exists()) error("没有可供电脑端重翻的英文字幕。")
+        val cached = JSONArray(file.readText(Charsets.UTF_8))
+        val result = JSONArray()
+        for (i in 0 until cached.length()) {
+            val item = cached.optJSONObject(i) ?: continue
+            val text = item.optString("englishText").trim()
+            if (text.isBlank()) continue
+            result.put(JSONObject().apply {
+                put("start", item.optLong("startMs", 0L) / 1000.0)
+                put("end", item.optLong("endMs", 0L) / 1000.0)
+                put("text", text)
+                put("translation", "")
+            })
+        }
+        if (result.length() == 0) error("没有可供电脑端重翻的英文字幕。")
+        return result
+    }
+
+    private fun postJson(urlText: String, payload: JSONObject): String {
+        val body = payload.toString().toByteArray(Charsets.UTF_8)
+        val connection = (URL(urlText).openConnection() as HttpURLConnection).apply {
+            requestMethod = "POST"
+            connectTimeout = 15_000
+            readTimeout = 60_000
+            doOutput = true
+            setRequestProperty("Content-Type", "application/json; charset=utf-8")
+            setRequestProperty("Connection", "close")
+            setFixedLengthStreamingMode(body.size)
+        }
+        connection.outputStream.use { it.write(body) }
+        return requestJobJson(connection)
+    }
+
+    private fun sha256File(file: File, onProgress: ((Int) -> Unit)? = null): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        val total = file.length().coerceAtLeast(1L)
+        var processed = 0L
+        file.inputStream().use { input ->
+            val buffer = ByteArray(1024 * 1024)
+            while (true) {
+                val read = input.read(buffer)
+                if (read <= 0) break
+                digest.update(buffer, 0, read)
+                processed += read
+                onProgress?.invoke((processed * 100 / total).toInt().coerceIn(0, 100))
+            }
+        }
+        return digest.digest().joinToString("") { "%02x".format(it) }
+    }
+
+    private fun remoteTaskProgress(
+        taskId: String,
+        stage: String,
+        percent: Int,
+        message: String,
+        serviceUrl: String
+    ) {
+        lastNotificationProgress = percent.coerceIn(0, 100)
+        CaptionTaskStore.updateRemoteProgress(
+            this,
+            taskId,
+            stage,
+            percent,
+            message,
+            serviceLabel(serviceUrl)
+        )
+        updateNotification(message)
+        sendProgress(message)
     }
 
     private fun createTranscriptJobWithRetry(serviceUrls: List<String>, initialServiceUrl: String, audio: RemoteAudioFile, videoTitle: String): String {
@@ -516,9 +862,17 @@ class CaptionGenerationService : Service() {
         return requestJobJson(connection)
     }
 
-    private fun pollTranscriptJob(serviceUrls: List<String>, initialServiceUrl: String, jobId: String): String {
+    private fun pollTranscriptJob(
+        serviceUrls: List<String>,
+        initialServiceUrl: String,
+        jobId: String,
+        taskId: String,
+        mode: String
+    ): String {
         var serviceUrl = initialServiceUrl
         var lastSwitchCheckAt = 0L
+        var retryDelayMs = 2_000L
+        var lastKnownProgress = CaptionTaskStore.all(this).firstOrNull { it.id == taskId }?.progress ?: 30
         while (true) {
             ensureTaskActive()
             val now = System.currentTimeMillis()
@@ -527,34 +881,81 @@ class CaptionGenerationService : Service() {
                 val preferred = runCatching { selectReachableServiceUrl(serviceUrls) }.getOrNull()
                 if (preferred != null && preferred != serviceUrl && serviceUrlPriority(preferred) < serviceUrlPriority(serviceUrl)) {
                     serviceUrl = preferred
-                    progress("检测到更稳定的连接，已切换到${serviceLabel(serviceUrl)}继续等待结果...")
+                    remoteTaskProgress(taskId, "连接电脑", lastKnownProgress, "检测到更稳定的连接，已切换到${serviceLabel(serviceUrl)}查询电脑任务。", serviceUrl)
                 }
             }
             val json = try {
                 requestJobJson(URL(jobStatusUrl(serviceUrl, jobId)))
             } catch (error: Exception) {
-                val preferred = selectReachableServiceUrl(serviceUrls)
-                if (preferred != serviceUrl) {
-                    serviceUrl = preferred
-                    progress("轮询连接中断，已切换到${serviceLabel(serviceUrl)}继续等待结果...")
-                    requestJobJson(URL(jobStatusUrl(serviceUrl, jobId)))
+                val taskMissingAtThisAddress = error.message.orEmpty().contains("HTTP 404")
+                val preferred = runCatching { selectReachableServiceUrl(serviceUrls) }.getOrNull()
+                if (preferred != null) serviceUrl = preferred
+                val waitSeconds = (retryDelayMs / 1000L).coerceAtLeast(1L)
+                val reconnectMessage = if (taskMissingAtThisAddress) {
+                    "当前地址暂时找不到电脑任务，已保留任务 ID；${waitSeconds}秒后继续尝试其他连接。"
                 } else {
-                    throw error
+                    "电脑仍会独立处理；手机暂时无法获取进度，${waitSeconds}秒后自动重连。"
                 }
+                remoteTaskProgress(
+                    taskId,
+                    "等待连接电脑",
+                    lastKnownProgress,
+                    reconnectMessage,
+                    serviceUrl
+                )
+                Thread.sleep(retryDelayMs)
+                retryDelayMs = (retryDelayMs * 2).coerceAtMost(60_000L)
+                continue
             }
+            retryDelayMs = 2_000L
             val item = JSONObject(json)
             val status = item.optString("status")
-            val percent = item.optInt("progress", 0).coerceIn(0, 100)
-            val message = item.optString("message").ifBlank { item.optString("stage") }
-            progress("正在生成字幕：$percent% $message")
+            val serverPercent = item.optInt("progress", 0).coerceIn(0, 100)
+            val serverStage = item.optString("stage")
+            val stageProgress = item.optInt("stage_progress", serverPercent).coerceIn(0, 100)
+            val processedSeconds = item.optLong("processed_seconds", 0L)
+            val totalSeconds = item.optLong("total_seconds", 0L)
+            val detail = item.optString("message").ifBlank { serverStage }
+            val overall = if (mode == "retranslate") {
+                (85 + serverPercent * 14 / 100).coerceIn(85, 99)
+            } else {
+                (30 + serverPercent * 69 / 100).coerceIn(30, 99)
+            }
+            lastKnownProgress = overall
+            val timeDetail = if (processedSeconds > 0L && totalSeconds > 0L) {
+                " ${formatSeconds(processedSeconds)} / ${formatSeconds(totalSeconds)}"
+            } else {
+                ""
+            }
+            val stageLabel = remoteStageLabel(serverStage, mode)
+            remoteTaskProgress(
+                taskId,
+                stageLabel,
+                overall,
+                "$stageLabel：本阶段 $stageProgress%$timeDetail；总进度 $overall%。$detail",
+                serviceUrl
+            )
             when (status) {
                 "done" -> return (item.optJSONArray("result") ?: JSONArray()).toString()
-                "error" -> error(item.optString("error").ifBlank { message.ifBlank { "服务端生成失败" } })
+                "error" -> error(item.optString("error").ifBlank { detail.ifBlank { "电脑端生成失败" } })
             }
-            Thread.sleep(1_000)
+            Thread.sleep(1_500L)
         }
     }
 
+    private fun remoteStageLabel(stage: String, mode: String): String = when (stage.lowercase()) {
+        "queued", "starting", "loading", "detecting" -> "电脑准备任务"
+        "transcribing" -> "识别英文字幕"
+        "postprocessing" -> "整理字幕断句"
+        "translating" -> if (mode == "retranslate") "重新翻译中文" else "翻译中文字幕"
+        "done" -> "电脑处理完成"
+        else -> if (mode == "retranslate") "重新翻译中文" else "电脑生成字幕"
+    }
+
+    private fun formatSeconds(seconds: Long): String {
+        val safe = seconds.coerceAtLeast(0L)
+        return "%02d:%02d".format(safe / 60, safe % 60)
+    }
     private fun requestJobJson(url: URL): String {
         val connection = (url.openConnection() as HttpURLConnection).apply {
             requestMethod = "GET"
@@ -570,6 +971,27 @@ class CaptionGenerationService : Service() {
         val body = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
         if (code !in 200..299) error("HTTP $code: $body")
         return body
+    }
+
+    private fun uploadCollectionUrl(serviceUrl: String): String = serviceEndpointUrl(serviceUrl, "/uploads")
+
+    private fun uploadItemUrl(serviceUrl: String, uploadId: String): String =
+        serviceEndpointUrl(serviceUrl, "/uploads/$uploadId")
+
+    private fun uploadCompleteUrl(serviceUrl: String, uploadId: String): String =
+        serviceEndpointUrl(serviceUrl, "/uploads/$uploadId/complete")
+
+    private fun serviceEndpointUrl(serviceUrl: String, endpoint: String): String {
+        val base = serviceUrl.substringBefore("?").removeSuffix("/")
+        val query = serviceUrl.substringAfter("?", "")
+        val root = when {
+            base.endsWith("/transcribe") -> base.removeSuffix("/transcribe")
+            base.endsWith("/translate") -> base.removeSuffix("/translate")
+            base.endsWith("/jobs") -> base.removeSuffix("/jobs")
+            else -> base
+        }
+        val target = "$root$endpoint"
+        return if (query.isBlank()) target else "$target?$query"
     }
 
     private fun jobCreateUrl(serviceUrl: String): String {
@@ -987,6 +1409,7 @@ class CaptionGenerationService : Service() {
         const val EXTRA_SERVICE_URLS = "service_urls"
         const val EXTRA_TASK_KIND = "task_kind"
         const val EXTRA_TASK_ID = "task_id"
+        const val EXTRA_FORCE_TRANSCRIBE = "force_transcribe"
         const val EXTRA_VIDEO_TITLE = "video_title"
         const val EXTRA_MESSAGE = "message"
         const val EXTRA_COUNT = "count"
@@ -996,6 +1419,7 @@ class CaptionGenerationService : Service() {
         const val TRANSLATION_SOURCE_COMPUTER = "computer"
         const val TRANSLATION_SOURCE_PHONE = "phone"
         private const val MAX_AUTO_FAILURES = 5
+        private const val UPLOAD_CHUNK_BYTES = 1024 * 1024
         private const val CHANNEL_ID = "caption_generation"
         private const val NOTIFICATION_ID = 42
         private const val SUBTITLE_CACHE_DIR = "subtitles_cache"

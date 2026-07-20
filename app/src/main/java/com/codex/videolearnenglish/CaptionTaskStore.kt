@@ -37,7 +37,14 @@ data class CaptionTask(
     val createdAt: Long,
     val updatedAt: Long,
     val completedAt: Long,
-    val error: String?
+    val error: String?,
+    val audioHash: String,
+    val uploadId: String,
+    val uploadedBytes: Long,
+    val totalBytes: Long,
+    val remoteJobId: String,
+    val remoteUpdatedAt: Long,
+    val forceTranscribe: Boolean
 )
 
 object CaptionTaskStore {
@@ -50,12 +57,22 @@ object CaptionTaskStore {
     fun all(context: Context): List<CaptionTask> = read(context)
 
     @Synchronized
-    fun enqueue(context: Context, uri: Uri, title: String, taskKind: String = TASK_GENERATE, resetFailures: Boolean = true): CaptionTask {
+    fun enqueue(
+        context: Context,
+        uri: Uri,
+        title: String,
+        taskKind: String = TASK_GENERATE,
+        resetFailures: Boolean = true,
+        forceTranscribe: Boolean? = null
+    ): CaptionTask {
         val now = System.currentTimeMillis()
         val id = stableId(uri.toString())
         val tasks = read(context).toMutableList()
         val existingIndex = tasks.indexOfFirst { it.id == id }
         val existing = tasks.getOrNull(existingIndex)
+        val forceRegeneration = taskKind == TASK_GENERATE && (
+            forceTranscribe ?: (existing?.forceTranscribe == true || existing?.status == CaptionTaskStatus.DONE)
+        )
         val task = CaptionTask(
             id = id,
             uri = uri.toString(),
@@ -72,7 +89,14 @@ object CaptionTaskStore {
             createdAt = existing?.createdAt ?: now,
             updatedAt = now,
             completedAt = 0L,
-            error = null
+            error = null,
+            audioHash = existing?.audioHash.orEmpty(),
+            uploadId = existing?.uploadId.orEmpty(),
+            uploadedBytes = existing?.uploadedBytes ?: 0L,
+            totalBytes = existing?.totalBytes ?: 0L,
+            remoteJobId = "",
+            remoteUpdatedAt = existing?.remoteUpdatedAt ?: 0L,
+            forceTranscribe = forceRegeneration
         )
         if (existingIndex >= 0) tasks[existingIndex] = task else tasks.add(0, task)
         write(context, tasks)
@@ -183,6 +207,82 @@ object CaptionTaskStore {
     }
 
     @Synchronized
+    fun recordUpload(
+        context: Context,
+        id: String,
+        audioHash: String,
+        uploadId: String,
+        uploadedBytes: Long,
+        totalBytes: Long
+    ) {
+        update(context, id) {
+            it.copy(
+                audioHash = audioHash.ifBlank { it.audioHash },
+                uploadId = uploadId.ifBlank { it.uploadId },
+                uploadedBytes = uploadedBytes.coerceAtLeast(0L),
+                totalBytes = totalBytes.coerceAtLeast(0L),
+                remoteUpdatedAt = System.currentTimeMillis(),
+                updatedAt = System.currentTimeMillis()
+            )
+        }
+    }
+
+    @Synchronized
+    fun recordRemoteJob(context: Context, id: String, jobId: String) {
+        update(context, id) {
+            it.copy(
+                remoteJobId = jobId,
+                remoteUpdatedAt = System.currentTimeMillis(),
+                updatedAt = System.currentTimeMillis(),
+                error = null
+            )
+        }
+    }
+
+    @Synchronized
+    fun updateRemoteProgress(
+        context: Context,
+        id: String,
+        stage: String,
+        progress: Int,
+        message: String,
+        connectionLabel: String = ""
+    ) {
+        update(context, id) {
+            it.copy(
+                status = CaptionTaskStatus.RUNNING,
+                stage = stage,
+                progress = progress.coerceIn(0, 100),
+                message = message,
+                connectionLabel = connectionLabel.ifBlank { it.connectionLabel },
+                remoteUpdatedAt = System.currentTimeMillis(),
+                updatedAt = System.currentTimeMillis(),
+                error = null
+            )
+        }
+    }
+
+    @Synchronized
+    fun markWaitingForComputer(context: Context, id: String, message: String) {
+        update(context, id) {
+            it.copy(
+                status = CaptionTaskStatus.QUEUED,
+                stage = "等待连接电脑",
+                message = message,
+                updatedAt = System.currentTimeMillis(),
+                error = null
+            )
+        }
+    }
+
+    @Synchronized
+    fun clearRemoteJob(context: Context, id: String) {
+        update(context, id) {
+            it.copy(remoteJobId = "", remoteUpdatedAt = 0L, updatedAt = System.currentTimeMillis())
+        }
+    }
+
+    @Synchronized
     fun cancel(context: Context, id: String) {
         update(context, id) {
             it.copy(
@@ -273,7 +373,14 @@ object CaptionTaskStore {
                     createdAt = item.optLong("createdAt", 0L),
                     updatedAt = item.optLong("updatedAt", 0L),
                     completedAt = item.optLong("completedAt", 0L),
-                    error = item.optString("error").takeIf { value -> value.isNotBlank() && value != "null" }
+                    error = item.optString("error").takeIf { value -> value.isNotBlank() && value != "null" },
+                    audioHash = item.optString("audioHash"),
+                    uploadId = item.optString("uploadId"),
+                    uploadedBytes = item.optLong("uploadedBytes", 0L).coerceAtLeast(0L),
+                    totalBytes = item.optLong("totalBytes", 0L).coerceAtLeast(0L),
+                    remoteJobId = item.optString("remoteJobId"),
+                    remoteUpdatedAt = item.optLong("remoteUpdatedAt", 0L),
+                    forceTranscribe = item.optBoolean("forceTranscribe", false)
                 )
             }
         }.getOrDefault(emptyList())
@@ -299,6 +406,13 @@ object CaptionTaskStore {
                 put("updatedAt", task.updatedAt)
                 put("completedAt", task.completedAt)
                 put("error", task.error ?: JSONObject.NULL)
+                put("audioHash", task.audioHash)
+                put("uploadId", task.uploadId)
+                put("uploadedBytes", task.uploadedBytes)
+                put("totalBytes", task.totalBytes)
+                put("remoteJobId", task.remoteJobId)
+                put("remoteUpdatedAt", task.remoteUpdatedAt)
+                put("forceTranscribe", task.forceTranscribe)
             })
         }
         storeFile(context).writeText(array.toString(), Charsets.UTF_8)

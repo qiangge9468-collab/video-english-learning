@@ -721,6 +721,16 @@ class LearningActivity : Activity() {
         }
         info.addView(cardTitle(task.title))
         info.addView(cardMeta("\u9636\u6bb5\uff1a${task.stage}\uff5c\u603b\u8fdb\u5ea6\uff1a${task.progress.coerceIn(0, 100)}%"))
+        if (task.totalBytes > 0L) {
+            val uploadPercent = (task.uploadedBytes.coerceIn(0L, task.totalBytes) * 100 / task.totalBytes).toInt()
+            info.addView(cardMeta("音频上传：$uploadPercent%（${formatBytes(task.uploadedBytes)} / ${formatBytes(task.totalBytes)}）"))
+        }
+        if (task.remoteJobId.isNotBlank()) {
+            val syncedAt = if (task.remoteUpdatedAt > 0L) {
+                SimpleDateFormat("HH:mm:ss", Locale.CHINA).format(Date(task.remoteUpdatedAt))
+            } else "等待首次同步"
+            info.addView(cardMeta("电脑任务：${task.remoteJobId.take(8)}…｜最后同步：$syncedAt"))
+        }
         info.addView(cardMeta(task.message.ifBlank { task.status.id }))
         top.addView(info, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         if (task.connectionLabel.isNotBlank()) top.addView(badge(task.connectionLabel))
@@ -2267,7 +2277,7 @@ class LearningActivity : Activity() {
             .show()
     }
 
-    private fun startCaptionGenerationService() {
+    private fun startCaptionGenerationService(forceTranscribe: Boolean = subtitles.isNotEmpty()) {
         val uri = currentVideoUri
         if (uri == null) {
             statusText.text = "请先导入或加载视频。"
@@ -2281,6 +2291,7 @@ class LearningActivity : Activity() {
             .putExtra(CaptionGenerationService.EXTRA_SERVICE_URL, currentServiceUrl())
             .putExtra(CaptionGenerationService.EXTRA_SERVICE_URLS, JSONArray(serviceUrlCandidates()).toString())
             .putExtra(CaptionGenerationService.EXTRA_TASK_KIND, CaptionGenerationService.TASK_GENERATE)
+            .putExtra(CaptionGenerationService.EXTRA_FORCE_TRANSCRIBE, forceTranscribe)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             startForegroundService(intent)
         } else {

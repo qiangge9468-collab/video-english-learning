@@ -10,6 +10,11 @@ import uuid
 import urllib.request
 from urllib.parse import parse_qs, unquote, urlparse
 
+try:
+    from durable_job_store import DurableJobStore
+except ModuleNotFoundError:
+    from tools.durable_job_store import DurableJobStore
+
 VIDEO_PATHS = {
     "backpacking": r"C:\Users\ASUS\Downloads\Full Gear List for Solo Backpacking.mp4",
 }
@@ -81,6 +86,8 @@ TRANSLATION_BATCH_SIZE = int(os.environ.get("TRANSLATION_BATCH_SIZE", "16"))
 MAX_UPLOAD_MB = int(os.environ.get("WHISPER_MAX_UPLOAD_MB", "2048"))
 AUTH_TOKEN = os.environ.get("WHISPER_AUTH_TOKEN", "").strip()
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SERVICE_DATA_DIR = os.environ.get("VIDEO_ENGLISH_DATA_DIR", os.path.join(PROJECT_ROOT, "service_data"))
+JOB_STORE = DurableJobStore(SERVICE_DATA_DIR)
 MODELS_DIR = os.path.join(PROJECT_ROOT, "models")
 LOCAL_NLLB_MODEL_DIR = os.path.join(MODELS_DIR, "nllb-200-distilled-600M")
 DEFAULT_TRANSLATION_MODEL = (
@@ -131,6 +138,7 @@ _model_lock = threading.Lock()
 _models = {}
 _jobs_lock = threading.Lock()
 _jobs = {}
+_job_execution_lock = threading.Lock()
 _runtime_status_lock = threading.Lock()
 
 
@@ -150,6 +158,7 @@ def default_runtime_status():
         "translation_provider": TRANSLATION_PROVIDER,
         "translation_model": compact_model_name(TRANSLATION_MODEL),
         "translation_languages": f"{TRANSLATION_SOURCE_LANGUAGE}->{TRANSLATION_TARGET_LANGUAGE}",
+        "service_data_dir": SERVICE_DATA_DIR,
         "translation_style": TRANSLATION_STYLE,
         "translation_batch_size": TRANSLATION_BATCH_SIZE,
         "job_status": "idle",
@@ -222,6 +231,18 @@ class TranscribeHandler(BaseHTTPRequestHandler):
             self.send_json(runtime_status())
             return
 
+        if parsed.path.startswith("/uploads/"):
+            if not self.authorized(parsed):
+                self.send_json({"error": "unauthorized"}, status=401)
+                return
+            upload_id = parsed.path.rstrip("/").rsplit("/", 1)[-1]
+            upload = JOB_STORE.get_upload(upload_id)
+            if upload is None:
+                self.send_json({"error": "upload not found"}, status=404)
+            else:
+                self.send_json(public_upload(upload))
+            return
+
         if parsed.path.startswith("/jobs/"):
             if not self.authorized(parsed):
                 self.send_json({"error": "unauthorized"}, status=401)
@@ -253,6 +274,45 @@ class TranscribeHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         parsed = urlparse(self.path)
+        if parsed.path == "/uploads":
+            if not self.authorized(parsed):
+                self.send_json({"error": "unauthorized"}, status=401)
+                return
+            try:
+                payload = self.read_json_body()
+                upload = JOB_STORE.create_upload(
+                    payload.get("audio_hash"),
+                    payload.get("total_bytes"),
+                    payload.get("mime_type", "audio/mp4"),
+                    payload.get("video_title", ""),
+                )
+                self.send_json(public_upload(upload))
+            except Exception as exc:
+                self.send_json({"error": str(exc)}, status=400)
+            return
+
+        upload_match = re.fullmatch(r"/uploads/([0-9a-f]{64})/complete", parsed.path)
+        if upload_match:
+            if not self.authorized(parsed):
+                self.send_json({"error": "unauthorized"}, status=401)
+                return
+            try:
+                payload = self.read_json_body(allow_empty=True)
+                upload = JOB_STORE.finalize_upload(upload_match.group(1))
+                job = submit_durable_job(
+                    upload,
+                    mode=str(payload.get("mode", "generate")),
+                    force=bool(payload.get("force", False)),
+                    video_title=str(payload.get("video_title") or upload.get("video_title") or ""),
+                    segments=payload.get("segments"),
+                )
+                self.send_json({"job_id": job["job_id"], "reused": bool(job.get("reused", False))})
+            except KeyError as exc:
+                self.send_json({"error": str(exc)}, status=404)
+            except Exception as exc:
+                self.send_json({"error": str(exc)}, status=400)
+            return
+
         if parsed.path == "/translate":
             if not self.authorized(parsed):
                 self.send_json({"error": "unauthorized"}, status=401)
@@ -285,7 +345,7 @@ class TranscribeHandler(BaseHTTPRequestHandler):
         video_title = decode_video_title(self.headers.get("X-Video-Title", ""))
 
         if parsed.path == "/jobs":
-            job_id = create_job(video_path, video_title)
+            job_id = create_job(video_path, video_title, self.headers.get("Content-Type", "audio/mp4"))
             self.send_json({"job_id": job_id})
             return
 
@@ -296,6 +356,39 @@ class TranscribeHandler(BaseHTTPRequestHandler):
                 os.remove(video_path)
             except OSError:
                 pass
+
+    def do_PUT(self):
+        parsed = urlparse(self.path)
+        upload_match = re.fullmatch(r"/uploads/([0-9a-f]{64})", parsed.path)
+        if not upload_match:
+            self.send_json({"error": "not found"}, status=404)
+            return
+        if not self.authorized(parsed):
+            self.send_json({"error": "unauthorized"}, status=401)
+            return
+        try:
+            content_length = int(self.headers.get("Content-Length", "0") or "0")
+            start = int(self.headers.get("X-Upload-Offset", "-1"))
+            upload = JOB_STORE.append_upload(upload_match.group(1), start, content_length, self.rfile)
+            self.send_json(public_upload(upload))
+        except KeyError as exc:
+            self.send_json({"error": str(exc)}, status=404)
+        except Exception as exc:
+            self.send_json({"error": str(exc)}, status=409 if "offset mismatch" in str(exc) else 400)
+
+    def read_json_body(self, allow_empty=False):
+        content_length = int(self.headers.get("Content-Length", "0") or "0")
+        if content_length <= 0:
+            if allow_empty:
+                return {}
+            raise ValueError("empty request")
+        if content_length > 16 * 1024 * 1024:
+            raise ValueError("request is too large")
+        body = self.rfile.read(content_length).decode("utf-8-sig")
+        value = json.loads(body)
+        if not isinstance(value, dict):
+            raise ValueError("JSON body must be an object")
+        return value
 
     def translate_and_send(self):
         content_length = int(self.headers.get("Content-Length", "0") or "0")
@@ -412,6 +505,13 @@ def service_config():
     config = {
         "token_required": bool(AUTH_TOKEN),
         "transcribe_urls": [f"http://127.0.0.1:{current_port}/transcribe{token_suffix}"],
+        "service_data_dir": SERVICE_DATA_DIR,
+        "capabilities": {
+            "durable_jobs": True,
+            "resumable_uploads": True,
+            "audio_cache": True,
+            "subtitle_cache": True,
+        },
     }
     try:
         with open(RUNTIME_CONFIG_PATH, "r", encoding="utf-8-sig") as handle:
@@ -470,89 +570,140 @@ def write_chunked_temp_upload(source, suffix):
     return path
 
 
-def create_job(video_path, video_title=""):
-    job_id = uuid.uuid4().hex
-    write_runtime_status(
-        current_job_id=job_id,
-        job_status="queued",
-        stage="queued",
-        progress=0,
-        message="Queued uploaded file",
-        source_file=os.path.basename(video_path),
+def public_upload(upload):
+    return {
+        "upload_id": upload["upload_id"],
+        "audio_hash": upload["audio_hash"],
+        "total_bytes": int(upload["total_bytes"]),
+        "offset": int(upload.get("offset", 0)),
+        "complete": bool(upload.get("complete", False)),
+        "audio_cached": bool(upload.get("complete", False)),
+    }
+
+
+def create_job(video_path, video_title="", mime_type="audio/mp4"):
+    upload = JOB_STORE.import_audio(video_path, mime_type, video_title)
+    job = submit_durable_job(upload, mode="generate", force=False, video_title=video_title)
+    return job["job_id"]
+
+
+def submit_durable_job(upload, mode="generate", force=False, video_title="", segments=None):
+    audio_hash = upload["audio_hash"]
+    active = JOB_STORE.find_active_job(audio_hash, mode)
+    if active is not None:
+        active["reused"] = True
+        return active
+    if mode == "generate" and not force:
+        cached = JOB_STORE.load_bilingual(audio_hash)
+        if isinstance(cached, list) and cached:
+            job = JOB_STORE.create_job(audio_hash, upload.get("audio_path", ""), video_title, mode, force)
+            JOB_STORE.finish_job(job["job_id"], cached)
+            finished = JOB_STORE.get_job(job["job_id"], include_result=False)
+            finished["reused"] = True
+            return finished
+    if mode == "retranslate":
+        if segments is not None and not isinstance(segments, list):
+            raise ValueError("segments must be a list")
+        if not segments:
+            segments = JOB_STORE.load_english(audio_hash)
+        if not isinstance(segments, list) or not segments:
+            raise ValueError("no saved English subtitles are available for retranslation")
+        JOB_STORE.save_english(audio_hash, segments)
+        payload = {"segments": segments}
+    else:
+        payload = None
+    job = JOB_STORE.create_job(
+        audio_hash,
+        upload.get("audio_path", ""),
+        video_title,
+        mode,
+        force,
+        input_payload=payload,
     )
-    with _jobs_lock:
-        _jobs[job_id] = {
-            "id": job_id,
-            "status": "queued",
-            "stage": "queued",
-            "progress": 0,
-            "message": "Queued",
-            "result": None,
-            "error": None,
-            "created_at": time.time(),
-            "updated_at": time.time(),
-        }
-    thread = threading.Thread(target=run_job, args=(job_id, video_path, video_title), daemon=True)
-    thread.start()
-    return job_id
+    start_job_thread(job["job_id"])
+    return job
 
 
 def get_job(job_id):
-    with _jobs_lock:
-        job = _jobs.get(job_id)
-        return dict(job) if job is not None else None
+    return JOB_STORE.get_job(job_id)
 
 
 def update_job(job_id, **changes):
-    with _jobs_lock:
-        job = _jobs.get(job_id)
-        if job is None:
-            return
-        job.update(changes)
-        job["updated_at"] = time.time()
+    return JOB_STORE.update_job(job_id, **changes)
 
 
-def run_job(job_id, video_path, video_title=""):
+def start_job_thread(job_id):
+    thread = threading.Thread(target=run_job, args=(job_id,), daemon=True, name=f"caption-job-{job_id[:8]}")
+    thread.start()
+
+
+def run_job(job_id):
+    job = JOB_STORE.get_job(job_id, include_result=False)
+    if job is None:
+        return
+    video_path = job.get("audio_path", "")
+    video_title = job.get("video_title", "")
+    audio_hash = job.get("audio_hash", "")
+    mode = job.get("mode", "generate")
     try:
-        print(f"[job {job_id}] queued file={video_path}")
-        update_job(job_id, status="running", stage="starting", progress=1, message="Preparing uploaded file")
-        write_runtime_status(
-            current_job_id=job_id,
-            job_status="running",
-            stage="starting",
-            progress=1,
-            message="Preparing uploaded file",
-            source_file=os.path.basename(video_path),
-            subtitle_count=0,
-            error="",
-        )
+        with _job_execution_lock:
+            if mode == "generate" and (not video_path or not os.path.isfile(video_path)):
+                raise FileNotFoundError("saved audio file is missing")
+            print(f"[job {job_id}] mode={mode} audio={video_path}", flush=True)
+            update_job(job_id, status="running", stage="starting", progress=1, stage_progress=0, message="Preparing saved computer task")
+            write_runtime_status(
+                current_job_id=job_id,
+                job_status="running",
+                stage="starting",
+                progress=1,
+                message="Preparing saved computer task",
+                source_file=os.path.basename(video_path),
+                subtitle_count=0,
+                error="",
+            )
 
-        def progress(stage, percent, message):
-            print(f"[job {job_id}] {percent:03d}% {stage}: {message}", flush=True)
-            update_job(job_id, status="running", stage=stage, progress=percent, message=message)
-            write_runtime_status(current_job_id=job_id, job_status="running", stage=stage, progress=percent, message=message)
+            def progress(stage, percent, message):
+                print(f"[job {job_id}] {percent:03d}% {stage}: {message}", flush=True)
+                processed, total = progress_times(message)
+                stage_progress = stage_percent(stage, percent)
+                update_job(
+                    job_id,
+                    status="running",
+                    stage=stage,
+                    progress=percent,
+                    stage_progress=stage_progress,
+                    processed_seconds=processed,
+                    total_seconds=total,
+                    message=message,
+                )
+                write_runtime_status(current_job_id=job_id, job_status="running", stage=stage, progress=percent, message=message)
 
-        result = transcribe(video_path, progress, video_title)
-        print(f"[job {job_id}] done segments={len(result)}", flush=True)
-        write_runtime_status(
-            current_job_id=job_id,
-            job_status="done",
-            stage="done",
-            progress=100,
-            message=f"Generated {len(result)} subtitles",
-            subtitle_count=len(result),
-            error="",
-        )
-        update_job(
-            job_id,
-            status="done",
-            stage="done",
-            progress=100,
-            message=f"Generated {len(result)} subtitles",
-            result=result,
-        )
+            if mode == "retranslate":
+                source = JOB_STORE.job_input(job_id).get("segments") or JOB_STORE.load_english(audio_hash)
+                if not source:
+                    raise ValueError("saved English subtitles are missing")
+                english = [dict(item, translation="") for item in source]
+                progress("translating", 92, "Translating saved English subtitles")
+                result = translate_segments(english, "en", progress)
+            else:
+                def save_english(segments):
+                    JOB_STORE.save_english(audio_hash, segments)
+                result = transcribe(video_path, progress, video_title, english_ready=save_english)
+            JOB_STORE.save_bilingual(audio_hash, result)
+            JOB_STORE.finish_job(job_id, result)
+            print(f"[job {job_id}] done segments={len(result)}", flush=True)
+            write_runtime_status(
+                current_job_id=job_id,
+                job_status="done",
+                stage="done",
+                progress=100,
+                message=f"Generated {len(result)} bilingual subtitles",
+                subtitle_count=len(result),
+                error="",
+            )
     except Exception as exc:
         print(f"[job {job_id}] error: {exc}", flush=True)
+        JOB_STORE.fail_job(job_id, exc)
         write_runtime_status(
             current_job_id=job_id,
             job_status="error",
@@ -561,15 +712,41 @@ def run_job(job_id, video_path, video_title=""):
             message=str(exc),
             error=str(exc),
         )
-        update_job(job_id, status="error", stage="error", progress=100, message=str(exc), error=str(exc))
-    finally:
-        try:
-            os.remove(video_path)
-        except OSError:
-            pass
 
 
-def transcribe(video_path, progress=None, video_title=""):
+def progress_times(message):
+    match = re.search(r"(\d{2}):(\d{2})\s*/\s*(\d{2}):(\d{2})", str(message))
+    if not match:
+        return 0, 0
+    processed = int(match.group(1)) * 60 + int(match.group(2))
+    total = int(match.group(3)) * 60 + int(match.group(4))
+    return processed, total
+
+
+def stage_percent(stage, overall):
+    ranges = {
+        "detecting": (0, 10),
+        "loading": (0, 100),
+        "transcribing": (0, 100),
+        "postprocessing": (0, 100),
+        "translating": (0, 100),
+    }
+    if stage not in ranges:
+        return int(overall)
+    if stage == "transcribing":
+        return max(0, min(100, int((overall - 12) * 100 / 74)))
+    if stage == "translating":
+        return max(0, min(100, int((overall - 92) * 100 / 8)))
+    return int(overall)
+
+
+def recover_persistent_jobs():
+    for job in JOB_STORE.recoverable_jobs():
+        job_id = job["job_id"]
+        JOB_STORE.update_job(job_id, status="queued", stage="queued", message="Recovered after computer service restart")
+        start_job_thread(job_id)
+
+def transcribe(video_path, progress=None, video_title="", english_ready=None):
     if WHISPER_FORCE_LANGUAGE and WHISPER_FORCE_LANGUAGE not in ("auto", "detect"):
         language = WHISPER_FORCE_LANGUAGE
         report(progress, "detecting", 6, f"Using configured language: {language}")
@@ -640,6 +817,8 @@ def transcribe(video_path, progress=None, video_title=""):
     result = words_to_sentence_segments(raw_words) if raw_words else merge_sentence_segments(raw_segments)
     result = correct_recognized_captions(result)
     result = add_sentence_timing_padding(result)
+    if english_ready is not None:
+        english_ready(result)
     report(progress, "translating", 92, "Translating English subtitles")
     result = translate_segments(result, language, progress)
     print(f"Generated {len(result)} segments.")
@@ -1714,11 +1893,14 @@ def main():
         progress=0,
         message="Waiting for a phone request",
     )
+    recover_persistent_jobs()
     server = ThreadingHTTPServer((host, port), TranscribeHandler)
     print(f"Whisper service running at http://{host}:{port}")
     print("GET  /ping")
     print("GET  /transcribe?video=backpacking keeps the old local-file debug flow.")
     print("POST /transcribe accepts an uploaded video/audio file from the phone.")
+    print("POST /uploads + PUT /uploads/<sha256> support resumable audio uploads.")
+    print(f"Persistent audio, jobs, and subtitles: {SERVICE_DATA_DIR}")
     print("Set WHISPER_AUTH_TOKEN before exposing this service to the internet.")
     server.serve_forever()
 
