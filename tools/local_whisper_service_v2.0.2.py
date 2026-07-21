@@ -1,6 +1,7 @@
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
+import queue
 import re
 import sys
 import tempfile
@@ -140,6 +141,10 @@ _jobs_lock = threading.Lock()
 _jobs = {}
 _job_execution_lock = threading.Lock()
 _runtime_status_lock = threading.Lock()
+_job_queue = queue.Queue()
+_queued_job_ids = set()
+_job_queue_lock = threading.Lock()
+_job_worker_started = False
 
 
 def compact_model_name(model_name):
@@ -633,8 +638,52 @@ def update_job(job_id, **changes):
 
 
 def start_job_thread(job_id):
-    thread = threading.Thread(target=run_job, args=(job_id,), daemon=True, name=f"caption-job-{job_id[:8]}")
-    thread.start()
+    global _job_worker_started
+    with _job_queue_lock:
+        if job_id in _queued_job_ids:
+            return
+        _queued_job_ids.add(job_id)
+        if not _job_worker_started:
+            thread = threading.Thread(target=job_queue_worker, daemon=True, name="caption-job-worker")
+            thread.start()
+            _job_worker_started = True
+        position = _job_queue.qsize() + 1
+        JOB_STORE.update_job(
+            job_id,
+            status="queued",
+            stage="queued",
+            queue_position=position,
+            message=f"Queued on computer (position {position})",
+        )
+        _job_queue.put(job_id)
+
+
+def job_queue_worker():
+    while True:
+        job_id = _job_queue.get()
+        try:
+            refresh_queue_positions(job_id)
+            run_job(job_id)
+        finally:
+            with _job_queue_lock:
+                _queued_job_ids.discard(job_id)
+            _job_queue.task_done()
+            refresh_queue_positions()
+
+
+def refresh_queue_positions(running_job_id=None):
+    with _job_queue.mutex:
+        waiting = list(_job_queue.queue)
+    if running_job_id:
+        JOB_STORE.update_job(running_job_id, queue_position=0)
+    for index, queued_id in enumerate(waiting, start=1):
+        job = JOB_STORE.get_job(queued_id, include_result=False)
+        if job and job.get("status") == "queued":
+            JOB_STORE.update_job(
+                queued_id,
+                queue_position=index,
+                message=f"Queued on computer (position {index})",
+            )
 
 
 def run_job(job_id):

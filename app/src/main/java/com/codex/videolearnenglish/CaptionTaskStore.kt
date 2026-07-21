@@ -42,6 +42,7 @@ data class CaptionTask(
     val uploadId: String,
     val uploadedBytes: Long,
     val totalBytes: Long,
+    val uploadPrepared: Boolean,
     val remoteJobId: String,
     val remoteUpdatedAt: Long,
     val forceTranscribe: Boolean
@@ -94,6 +95,7 @@ object CaptionTaskStore {
             uploadId = existing?.uploadId.orEmpty(),
             uploadedBytes = existing?.uploadedBytes ?: 0L,
             totalBytes = existing?.totalBytes ?: 0L,
+            uploadPrepared = false,
             remoteJobId = "",
             remoteUpdatedAt = existing?.remoteUpdatedAt ?: 0L,
             forceTranscribe = forceRegeneration
@@ -228,6 +230,40 @@ object CaptionTaskStore {
     }
 
     @Synchronized
+    fun markUploadPrepared(context: Context, id: String, connectionLabel: String) {
+        update(context, id) {
+            it.copy(
+                status = CaptionTaskStatus.QUEUED,
+                stage = "音频已上传",
+                progress = 30,
+                message = "音频已完整保存到电脑，等待同批音频全部上传后提交处理。",
+                connectionLabel = connectionLabel.ifBlank { it.connectionLabel },
+                uploadPrepared = true,
+                remoteUpdatedAt = System.currentTimeMillis(),
+                updatedAt = System.currentTimeMillis(),
+                error = null
+            )
+        }
+    }
+
+    @Synchronized
+    fun markSubmitted(context: Context, id: String, jobId: String, connectionLabel: String) {
+        update(context, id) {
+            it.copy(
+                status = CaptionTaskStatus.QUEUED,
+                stage = "电脑队列等待",
+                progress = it.progress.coerceAtLeast(30),
+                message = "已提交电脑端 FIFO 队列；手机断网不影响电脑继续处理。",
+                connectionLabel = connectionLabel.ifBlank { it.connectionLabel },
+                remoteJobId = jobId,
+                remoteUpdatedAt = System.currentTimeMillis(),
+                updatedAt = System.currentTimeMillis(),
+                error = null
+            )
+        }
+    }
+
+    @Synchronized
     fun recordRemoteJob(context: Context, id: String, jobId: String) {
         update(context, id) {
             it.copy(
@@ -327,14 +363,26 @@ object CaptionTaskStore {
     }
 
     @Synchronized
-    fun queued(context: Context): CaptionTask? =
-        read(context).firstOrNull { it.status == CaptionTaskStatus.QUEUED }
+    fun queued(context: Context): CaptionTask? {
+        val queued = read(context)
+            .filter { it.status == CaptionTaskStatus.QUEUED }
+            .sortedBy { it.createdAt }
+        return queued.firstOrNull { !it.uploadPrepared && it.remoteJobId.isBlank() }
+            ?: queued.firstOrNull { it.uploadPrepared && it.remoteJobId.isBlank() }
+            ?: queued.firstOrNull { it.remoteJobId.isNotBlank() }
+    }
 
     @Synchronized
     fun recoverable(context: Context): CaptionTask? =
         read(context).let { tasks ->
             tasks.firstOrNull { it.status == CaptionTaskStatus.RUNNING }
-                ?: tasks.firstOrNull { it.status == CaptionTaskStatus.QUEUED }
+                ?: tasks.filter { it.status == CaptionTaskStatus.QUEUED }
+                    .sortedBy { it.createdAt }
+                    .let { queued ->
+                        queued.firstOrNull { !it.uploadPrepared && it.remoteJobId.isBlank() }
+                            ?: queued.firstOrNull { it.uploadPrepared && it.remoteJobId.isBlank() }
+                            ?: queued.firstOrNull { it.remoteJobId.isNotBlank() }
+                    }
         }
 
     fun stableId(uri: String): String {
@@ -378,6 +426,7 @@ object CaptionTaskStore {
                     uploadId = item.optString("uploadId"),
                     uploadedBytes = item.optLong("uploadedBytes", 0L).coerceAtLeast(0L),
                     totalBytes = item.optLong("totalBytes", 0L).coerceAtLeast(0L),
+                    uploadPrepared = item.optBoolean("uploadPrepared", false),
                     remoteJobId = item.optString("remoteJobId"),
                     remoteUpdatedAt = item.optLong("remoteUpdatedAt", 0L),
                     forceTranscribe = item.optBoolean("forceTranscribe", false)
@@ -410,6 +459,7 @@ object CaptionTaskStore {
                 put("uploadId", task.uploadId)
                 put("uploadedBytes", task.uploadedBytes)
                 put("totalBytes", task.totalBytes)
+                put("uploadPrepared", task.uploadPrepared)
                 put("remoteJobId", task.remoteJobId)
                 put("remoteUpdatedAt", task.remoteUpdatedAt)
                 put("forceTranscribe", task.forceTranscribe)

@@ -1,5 +1,6 @@
 import importlib.util
 import os
+import queue
 import sys
 import types
 import unittest
@@ -238,6 +239,57 @@ class ModelRuntimeTests(unittest.TestCase):
 
     def test_ing_phrase_is_not_preferred_as_a_subtitle_ending(self):
         self.assertTrue(self.service.weak_subtitle_ending("We went hiking"))
+
+    def test_computer_jobs_are_enqueued_fifo_without_per_job_threads(self):
+        self.service._job_queue = queue.Queue()
+        self.service._queued_job_ids = set()
+        self.service._job_worker_started = True
+        self.service.JOB_STORE = mock.Mock()
+        self.service.start_job_thread("first")
+        self.service.start_job_thread("second")
+        self.service.start_job_thread("third")
+        self.service.start_job_thread("second")
+        self.assertEqual(list(self.service._job_queue.queue), ["first", "second", "third"])
+        calls = self.service.JOB_STORE.update_job.call_args_list
+        self.assertEqual([call.args[0] for call in calls], ["first", "second", "third"])
+        self.assertEqual([call.kwargs["queue_position"] for call in calls], [1, 2, 3])
+
+    def test_single_worker_executes_jobs_in_fifo_order(self):
+        self.service._job_queue = queue.Queue()
+        self.service._queued_job_ids = set()
+        self.service._job_worker_started = False
+        self.service.JOB_STORE = mock.Mock()
+        self.service.JOB_STORE.get_job.return_value = {"status": "queued"}
+        order = []
+        self.service.run_job = lambda job_id: order.append(job_id)
+        self.service.start_job_thread("first")
+        self.service.start_job_thread("second")
+        self.service.start_job_thread("third")
+        self.service._job_queue.join()
+        self.assertEqual(order, ["first", "second", "third"])
+        self.assertTrue(self.service._job_worker_started)
+
+    def test_android_pipeline_keeps_failover_upload_barrier_and_visible_thumbnail(self):
+        root = SERVICE_PATH.parent.parent
+        service_source = (
+            root / "app" / "src" / "main" / "java" / "com" / "codex" /
+            "videolearnenglish" / "CaptionGenerationService.kt"
+        ).read_text(encoding="utf-8")
+        store_source = (
+            root / "app" / "src" / "main" / "java" / "com" / "codex" /
+            "videolearnenglish" / "CaptionTaskStore.kt"
+        ).read_text(encoding="utf-8")
+        activity_source = (
+            root / "app" / "src" / "main" / "java" / "com" / "codex" /
+            "videolearnenglish" / "LearningActivity.kt"
+        ).read_text(encoding="utf-8")
+        self.assertIn("connectTimeout = 2_500", service_source)
+        self.assertIn("readTimeout = 3_500", service_source)
+        self.assertIn("markUploadPrepared", service_source)
+        self.assertIn("markSubmitted", service_source)
+        self.assertLess(store_source.index("!it.uploadPrepared"), store_source.index("it.uploadPrepared && it.remoteJobId.isBlank()"))
+        self.assertIn("longArrayOf(0L, 500_000L, 1_000_000L, 2_000_000L)", activity_source)
+        self.assertIn("video_thumbnails_v2", activity_source)
 
 
 

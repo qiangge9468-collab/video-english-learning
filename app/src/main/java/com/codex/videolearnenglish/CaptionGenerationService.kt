@@ -109,7 +109,7 @@ class CaptionGenerationService : Service() {
 
                 val selectedServiceUrl = waitForReachableService(task.id, serviceUrls, task.progress)
                 val mode = if (taskKind == TASK_TRANSLATE_REMOTE) "retranslate" else "generate"
-                val json = try {
+                val json: String? = try {
                     runDurableComputerTask(task, videoUri, serviceUrls, selectedServiceUrl, mode)
                 } catch (error: Exception) {
                     if (error.message.orEmpty().contains("HTTP 404") && mode == "generate") {
@@ -121,6 +121,10 @@ class CaptionGenerationService : Service() {
                     } else {
                         throw error
                     }
+                }
+                if (json == null) {
+                    success = true
+                    return@Thread
                 }
                 val count = saveCachedSubtitles(videoUri, json)
                 success = count > 0
@@ -321,22 +325,18 @@ class CaptionGenerationService : Service() {
     }
 
     private fun selectReachableServiceUrl(candidates: List<String>): String {
-        val expanded = linkedSetOf<String>()
-        candidates.forEach { candidate ->
-            if (candidate.isNotBlank()) expanded += candidate
-            runCatching {
-                val configured = configuredServiceUrls(candidate)
-                if (configured.isNotEmpty()) {
-                    saveServiceUrlCandidates(configured)
-                    expanded.addAll(configured)
-                }
-            }
-        }
+        val expanded = linkedSetOf<String>().apply { addAll(candidates.filter { it.isNotBlank() }) }
         val errors = mutableListOf<String>()
         for (url in expanded.sortedWith(compareBy { serviceUrlPriority(it) })) {
             runCatching {
-                requestJobJson(URL(pingUrl(url)))
+                requestProbeJson(URL(pingUrl(url)))
             }.onSuccess {
+                val discovered = runCatching { configuredServiceUrls(url) }.getOrDefault(emptyList())
+                val remembered = linkedSetOf<String>().apply {
+                    addAll(expanded)
+                    addAll(discovered)
+                }.sortedWith(compareBy { serviceUrlPriority(it) })
+                saveServiceUrlCandidates(remembered)
                 getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
                     .edit()
                     .putString(SERVICE_URL_KEY, url)
@@ -374,7 +374,7 @@ class CaptionGenerationService : Service() {
     }
 
     private fun configuredServiceUrls(seedUrl: String): List<String> {
-        val json = requestJobJson(URL(configUrl(seedUrl)))
+        val json = requestProbeJson(URL(configUrl(seedUrl)))
         val item = JSONObject(json)
         val array = item.optJSONArray("transcribe_urls") ?: return emptyList()
         return (0 until array.length()).mapNotNull { index ->
@@ -453,7 +453,7 @@ class CaptionGenerationService : Service() {
         serviceUrls: List<String>,
         initialServiceUrl: String,
         mode: String
-    ): String {
+    ): String? {
         var task = CaptionTaskStore.all(this).firstOrNull { it.id == initialTask.id } ?: initialTask
         if (task.remoteJobId.isNotBlank()) {
             return pollTranscriptJob(serviceUrls, initialServiceUrl, task.remoteJobId, task.id, mode)
@@ -463,6 +463,12 @@ class CaptionGenerationService : Service() {
         val upload = ensureDurableUpload(task, videoUri, serviceUrls, serviceUrl)
         serviceUrl = upload.serviceUrl
         task = CaptionTaskStore.all(this).firstOrNull { it.id == task.id } ?: task
+        if (!task.uploadPrepared) {
+            CaptionTaskStore.markUploadPrepared(this, task.id, serviceLabel(serviceUrl))
+            updateNotification("音频已上传，继续上传队列中的其他视频")
+            sendProgress("${task.title} 的音频已上传，继续准备下一条任务。")
+            return null
+        }
         val segments = if (mode == "retranslate") cachedSegmentsForServer(videoUri) else null
         val submitted = completeDurableUploadWithReconnect(
             task.id,
@@ -477,7 +483,8 @@ class CaptionGenerationService : Service() {
         serviceUrl = submitted.first
         val jobId = submitted.second
         CaptionTaskStore.recordRemoteJob(this, task.id, jobId)
-        return pollTranscriptJob(serviceUrls, serviceUrl, jobId, task.id, mode)
+        CaptionTaskStore.markSubmitted(this, task.id, jobId, serviceLabel(serviceUrl))
+        return null
     }
 
     private data class DurableUpload(
@@ -913,6 +920,7 @@ class CaptionGenerationService : Service() {
             val serverPercent = item.optInt("progress", 0).coerceIn(0, 100)
             val serverStage = item.optString("stage")
             val stageProgress = item.optInt("stage_progress", serverPercent).coerceIn(0, 100)
+            val queuePosition = item.optInt("queue_position", 0).coerceAtLeast(0)
             val processedSeconds = item.optLong("processed_seconds", 0L)
             val totalSeconds = item.optLong("total_seconds", 0L)
             val detail = item.optString("message").ifBlank { serverStage }
@@ -928,11 +936,12 @@ class CaptionGenerationService : Service() {
                 ""
             }
             val stageLabel = remoteStageLabel(serverStage, mode)
+            val queueDetail = if (serverStage.equals("queued", true) && queuePosition > 0) "｜电脑队列第 $queuePosition 位" else ""
             remoteTaskProgress(
                 taskId,
                 stageLabel,
                 overall,
-                "$stageLabel：本阶段 $stageProgress%$timeDetail；总进度 $overall%。$detail",
+                "$stageLabel$queueDetail：本阶段 $stageProgress%$timeDetail；总进度 $overall%。$detail",
                 serviceUrl
             )
             when (status) {
@@ -961,6 +970,16 @@ class CaptionGenerationService : Service() {
             requestMethod = "GET"
             connectTimeout = 15_000
             readTimeout = 60_000
+        }
+        return requestJobJson(connection)
+    }
+
+    private fun requestProbeJson(url: URL): String {
+        val connection = (url.openConnection() as HttpURLConnection).apply {
+            requestMethod = "GET"
+            connectTimeout = 2_500
+            readTimeout = 3_500
+            setRequestProperty("Connection", "close")
         }
         return requestJobJson(connection)
     }

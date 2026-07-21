@@ -9,6 +9,7 @@ import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.SurfaceTexture
 import android.graphics.Matrix
 import android.graphics.drawable.GradientDrawable
@@ -916,16 +917,20 @@ class LearningActivity : Activity() {
         frame.addView(image, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
         val uri = runCatching { Uri.parse(uriText) }.getOrNull() ?: return frame
         val file = thumbnailCacheFile(uri)
-        if (file.exists() && file.length() > 0L) {
-            image.setImageURI(Uri.fromFile(file))
+        val cached = file.takeIf { it.exists() && it.length() > 0L }
+            ?.let { BitmapFactory.decodeFile(it.absolutePath) }
+        if (cached != null) {
+            image.setImageBitmap(cached)
             image.visibility = View.VISIBLE
             return frame
         }
         Thread {
             if (generateThumbnail(uri, file)) {
                 runOnUiThread {
-                    image.setImageURI(Uri.fromFile(file))
-                    image.visibility = View.VISIBLE
+                    BitmapFactory.decodeFile(file.absolutePath)?.let { bitmap ->
+                        image.setImageBitmap(bitmap)
+                        image.visibility = View.VISIBLE
+                    }
                 }
             }
         }.start()
@@ -936,7 +941,19 @@ class LearningActivity : Activity() {
         val retriever = MediaMetadataRetriever()
         return try {
             retriever.setDataSource(this, uri)
-            val bitmap = retriever.getFrameAtTime(0, MediaMetadataRetriever.OPTION_CLOSEST_SYNC) ?: return false
+            var fallback: Bitmap? = null
+            var selected: Bitmap? = null
+            for (timeUs in longArrayOf(0L, 500_000L, 1_000_000L, 2_000_000L)) {
+                val candidate = retriever.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC) ?: continue
+                if (fallback == null) fallback = candidate
+                if (!isMostlyBlack(candidate)) {
+                    selected = candidate
+                    break
+                }
+                if (candidate !== fallback) candidate.recycle()
+            }
+            val bitmap = selected ?: fallback ?: return false
+            if (selected != null && fallback != null && fallback !== selected) fallback.recycle()
             val scaled = scaleBitmapForCard(bitmap)
             output.parentFile?.mkdirs()
             FileOutputStream(output).use { stream ->
@@ -950,6 +967,26 @@ class LearningActivity : Activity() {
         } finally {
             runCatching { retriever.release() }
         }
+    }
+
+    private fun isMostlyBlack(bitmap: Bitmap): Boolean {
+        val stepX = (bitmap.width / 12).coerceAtLeast(1)
+        val stepY = (bitmap.height / 8).coerceAtLeast(1)
+        var dark = 0
+        var sampled = 0
+        var y = stepY / 2
+        while (y < bitmap.height) {
+            var x = stepX / 2
+            while (x < bitmap.width) {
+                val color = bitmap.getPixel(x, y)
+                val brightness = (android.graphics.Color.red(color) + android.graphics.Color.green(color) + android.graphics.Color.blue(color)) / 3
+                if (brightness < 18) dark += 1
+                sampled += 1
+                x += stepX
+            }
+            y += stepY
+        }
+        return sampled > 0 && dark * 100 / sampled >= 88
     }
 
     private fun scaleBitmapForCard(bitmap: Bitmap): Bitmap {
@@ -968,7 +1005,7 @@ class LearningActivity : Activity() {
     private fun thumbnailCacheFile(uri: Uri): File {
         val digest = MessageDigest.getInstance("SHA-256").digest(uri.toString().toByteArray(Charsets.UTF_8))
         val name = digest.joinToString("") { "%02x".format(it) }
-        return File(File(cacheDir, "video_thumbnails").apply { mkdirs() }, "$name.jpg")
+        return File(File(cacheDir, "video_thumbnails_v2").apply { mkdirs() }, "$name.jpg")
     }
 
     private fun illustratedEmptyState(message: String): LinearLayout = LinearLayout(this).apply {
