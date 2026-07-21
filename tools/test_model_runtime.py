@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest import mock
 
 
-SERVICE_PATH = Path(__file__).with_name("local_whisper_service.py")
+SERVICE_PATH = Path(__file__).with_name("local_whisper_service_v2.0.2.py")
 
 
 def load_service():

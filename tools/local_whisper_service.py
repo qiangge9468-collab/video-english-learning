@@ -8,12 +8,7 @@ import threading
 import time
 import uuid
 import urllib.request
-from urllib.parse import parse_qs, unquote, urlparse
-
-try:
-    from durable_job_store import DurableJobStore
-except ModuleNotFoundError:
-    from tools.durable_job_store import DurableJobStore
+from urllib.parse import parse_qs, urlparse
 
 VIDEO_PATHS = {
     "backpacking": r"C:\Users\ASUS\Downloads\Full Gear List for Solo Backpacking.mp4",
@@ -67,18 +62,8 @@ def add_windows_gpu_dll_directories():
 add_windows_gpu_dll_directories()
 
 SENTENCE_END_RE = re.compile(r"[.!?][\"')\]]*$")
-SOFT_SENTENCE_END_RE = re.compile(r"[,;:][\"')\]]*$")
-MIN_SUBTITLE_SECONDS = float(os.environ.get("SUBTITLE_MIN_SECONDS", "1.2"))
-TARGET_SUBTITLE_SECONDS = float(os.environ.get("SUBTITLE_TARGET_SECONDS", "5.8"))
-PREFERRED_MAX_SUBTITLE_SECONDS = float(os.environ.get("SUBTITLE_PREFERRED_MAX_SECONDS", "8.5"))
-MAX_SUBTITLE_SECONDS = float(os.environ.get("SUBTITLE_MAX_SECONDS", "12.0"))
-PREFERRED_MAX_SUBTITLE_WORDS = int(os.environ.get("SUBTITLE_PREFERRED_MAX_WORDS", "24"))
-MAX_SUBTITLE_WORDS = int(os.environ.get("SUBTITLE_MAX_WORDS", "30"))
-PREFERRED_MAX_SUBTITLE_CHARS = int(os.environ.get("SUBTITLE_PREFERRED_MAX_CHARS", "140"))
-MAX_SUBTITLE_CHARS = int(os.environ.get("SUBTITLE_MAX_CHARS", "160"))
-SILENCE_BREAK_SECONDS = float(os.environ.get("SUBTITLE_SILENCE_SECONDS", "0.75"))
-SOFT_SILENCE_SECONDS = float(os.environ.get("SUBTITLE_SOFT_SILENCE_SECONDS", "0.32"))
-ABSOLUTE_SILENCE_SECONDS = float(os.environ.get("SUBTITLE_ABSOLUTE_SILENCE_SECONDS", "1.2"))
+MAX_SENTENCE_SECONDS = 14.0
+MAX_SENTENCE_CHARS = 180
 START_PADDING_SECONDS = 0.03
 END_PADDING_SECONDS = 0.22
 MIN_GAP_SECONDS = 0.03
@@ -86,8 +71,6 @@ TRANSLATION_BATCH_SIZE = int(os.environ.get("TRANSLATION_BATCH_SIZE", "16"))
 MAX_UPLOAD_MB = int(os.environ.get("WHISPER_MAX_UPLOAD_MB", "2048"))
 AUTH_TOKEN = os.environ.get("WHISPER_AUTH_TOKEN", "").strip()
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SERVICE_DATA_DIR = os.environ.get("VIDEO_ENGLISH_DATA_DIR", os.path.join(PROJECT_ROOT, "service_data"))
-JOB_STORE = DurableJobStore(SERVICE_DATA_DIR)
 MODELS_DIR = os.path.join(PROJECT_ROOT, "models")
 LOCAL_NLLB_MODEL_DIR = os.path.join(MODELS_DIR, "nllb-200-distilled-600M")
 DEFAULT_TRANSLATION_MODEL = (
@@ -105,31 +88,19 @@ TRANSLATION_LOCAL_FILES_ONLY = os.environ.get("TRANSLATION_LOCAL_FILES_ONLY", "a
 DEVICE_FALLBACK = os.environ.get("MODEL_DEVICE_FALLBACK", "1").strip().lower() not in ("0", "false", "no", "off")
 WHISPER_HOTWORDS = os.environ.get(
     "WHISPER_HOTWORDS",
-    "clear English subtitles, proper names, place names, product names",
+    "as the crow flies, long way around Africa, coast to coast, Google Maps, serious planning",
 ).strip()
 WHISPER_INITIAL_PROMPT = os.environ.get(
     "WHISPER_INITIAL_PROMPT",
     "Clear English travel, hiking, backpacking, motorcycle and route-planning captions.",
 ).strip()
-WHISPER_FORCE_LANGUAGE = os.environ.get("WHISPER_FORCE_LANGUAGE", "en").strip().lower()
-OUTDOOR_HOTWORDS = (
-    "Dyneema, Dyneema Composite Fabric, DCF, UltraGrid, Hyperlite Mountain Gear, "
-    "trekking poles, trail runners, backpacking quilt, strength-to-weight ratio, "
-    "base camp, thru-hike, ultralight backpacking"
-)
-
 RUNTIME_CONFIG_PATH = os.environ.get(
     "WHISPER_RUNTIME_CONFIG",
     os.path.join(PROJECT_ROOT, "tools", "runtime_service_config.json"),
 )
-RUNTIME_STATUS_PATH = os.environ.get(
-    "WHISPER_RUNTIME_STATUS",
-    os.path.join(PROJECT_ROOT, "tools", "runtime_status.json"),
-)
 LOCAL_EN_SMALL_MODEL_DIR = os.path.join(MODELS_DIR, "faster-whisper-small")
 LOCAL_EN_MEDIUM_MODEL_DIR = os.path.join(MODELS_DIR, "faster-whisper-medium")
 LOCAL_EN_DISTIL_LARGE_V3_MODEL_DIR = os.path.join(MODELS_DIR, "faster-distil-whisper-large-v3")
-LOCAL_EN_LARGE_V3_MODEL_DIR = os.path.join(MODELS_DIR, "faster-whisper-large-v3")
 LOCAL_MULTI_MEDIUM_MODEL_DIR = os.path.join(MODELS_DIR, "faster-whisper-medium（Multilingual model）")
 
 _translator_lock = threading.Lock()
@@ -138,67 +109,6 @@ _model_lock = threading.Lock()
 _models = {}
 _jobs_lock = threading.Lock()
 _jobs = {}
-_job_execution_lock = threading.Lock()
-_runtime_status_lock = threading.Lock()
-
-
-def compact_model_name(model_name):
-    if not model_name:
-        return ""
-    return os.path.basename(model_name) if os.path.exists(model_name) else model_name
-
-
-def default_runtime_status():
-    return {
-        "service": "starting",
-        "port": os.environ.get("WHISPER_PORT", "8765"),
-        "configured_english_model": os.environ.get("WHISPER_ENGLISH_MODEL", "large-v3"),
-        "configured_whisper_device": os.environ.get("WHISPER_DEVICE", "auto"),
-        "configured_whisper_compute_type": os.environ.get("WHISPER_COMPUTE_TYPE", "auto"),
-        "translation_provider": TRANSLATION_PROVIDER,
-        "translation_model": compact_model_name(TRANSLATION_MODEL),
-        "translation_languages": f"{TRANSLATION_SOURCE_LANGUAGE}->{TRANSLATION_TARGET_LANGUAGE}",
-        "service_data_dir": SERVICE_DATA_DIR,
-        "translation_style": TRANSLATION_STYLE,
-        "translation_batch_size": TRANSLATION_BATCH_SIZE,
-        "job_status": "idle",
-        "stage": "idle",
-        "progress": 0,
-        "message": "Waiting for a phone request",
-    }
-
-
-def read_runtime_status_file():
-    try:
-        if os.path.exists(RUNTIME_STATUS_PATH):
-            with open(RUNTIME_STATUS_PATH, "r", encoding="utf-8-sig") as handle:
-                data = json.load(handle)
-                return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
-    return {}
-
-
-def runtime_status():
-    status = default_runtime_status()
-    status.update(read_runtime_status_file())
-    return status
-
-
-def write_runtime_status(**changes):
-    try:
-        with _runtime_status_lock:
-            status = default_runtime_status()
-            status.update(read_runtime_status_file())
-            status.update({key: value for key, value in changes.items() if value is not None})
-            status["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
-            os.makedirs(os.path.dirname(RUNTIME_STATUS_PATH), exist_ok=True)
-            temp_path = f"{RUNTIME_STATUS_PATH}.tmp"
-            with open(temp_path, "w", encoding="utf-8") as handle:
-                json.dump(status, handle, ensure_ascii=False, indent=2)
-            os.replace(temp_path, RUNTIME_STATUS_PATH)
-    except Exception as exc:
-        print(f"Could not write runtime status: {exc}", flush=True)
 
 
 class TranscribeHandler(BaseHTTPRequestHandler):
@@ -222,25 +132,6 @@ class TranscribeHandler(BaseHTTPRequestHandler):
                 self.send_json({"error": "unauthorized"}, status=401)
                 return
             self.send_json(model_status())
-            return
-
-        if parsed.path == "/status":
-            if not self.authorized(parsed):
-                self.send_json({"error": "unauthorized"}, status=401)
-                return
-            self.send_json(runtime_status())
-            return
-
-        if parsed.path.startswith("/uploads/"):
-            if not self.authorized(parsed):
-                self.send_json({"error": "unauthorized"}, status=401)
-                return
-            upload_id = parsed.path.rstrip("/").rsplit("/", 1)[-1]
-            upload = JOB_STORE.get_upload(upload_id)
-            if upload is None:
-                self.send_json({"error": "upload not found"}, status=404)
-            else:
-                self.send_json(public_upload(upload))
             return
 
         if parsed.path.startswith("/jobs/"):
@@ -274,45 +165,6 @@ class TranscribeHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         parsed = urlparse(self.path)
-        if parsed.path == "/uploads":
-            if not self.authorized(parsed):
-                self.send_json({"error": "unauthorized"}, status=401)
-                return
-            try:
-                payload = self.read_json_body()
-                upload = JOB_STORE.create_upload(
-                    payload.get("audio_hash"),
-                    payload.get("total_bytes"),
-                    payload.get("mime_type", "audio/mp4"),
-                    payload.get("video_title", ""),
-                )
-                self.send_json(public_upload(upload))
-            except Exception as exc:
-                self.send_json({"error": str(exc)}, status=400)
-            return
-
-        upload_match = re.fullmatch(r"/uploads/([0-9a-f]{64})/complete", parsed.path)
-        if upload_match:
-            if not self.authorized(parsed):
-                self.send_json({"error": "unauthorized"}, status=401)
-                return
-            try:
-                payload = self.read_json_body(allow_empty=True)
-                upload = JOB_STORE.finalize_upload(upload_match.group(1))
-                job = submit_durable_job(
-                    upload,
-                    mode=str(payload.get("mode", "generate")),
-                    force=bool(payload.get("force", False)),
-                    video_title=str(payload.get("video_title") or upload.get("video_title") or ""),
-                    segments=payload.get("segments"),
-                )
-                self.send_json({"job_id": job["job_id"], "reused": bool(job.get("reused", False))})
-            except KeyError as exc:
-                self.send_json({"error": str(exc)}, status=404)
-            except Exception as exc:
-                self.send_json({"error": str(exc)}, status=400)
-            return
-
         if parsed.path == "/translate":
             if not self.authorized(parsed):
                 self.send_json({"error": "unauthorized"}, status=401)
@@ -342,53 +194,19 @@ class TranscribeHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             self.send_json({"error": f"could not read upload: {exc}"}, status=400)
             return
-        video_title = decode_video_title(self.headers.get("X-Video-Title", ""))
 
         if parsed.path == "/jobs":
-            job_id = create_job(video_path, video_title, self.headers.get("Content-Type", "audio/mp4"))
+            job_id = create_job(video_path)
             self.send_json({"job_id": job_id})
             return
 
         try:
-            self.transcribe_and_send(video_path, video_title)
+            self.transcribe_and_send(video_path)
         finally:
             try:
                 os.remove(video_path)
             except OSError:
                 pass
-
-    def do_PUT(self):
-        parsed = urlparse(self.path)
-        upload_match = re.fullmatch(r"/uploads/([0-9a-f]{64})", parsed.path)
-        if not upload_match:
-            self.send_json({"error": "not found"}, status=404)
-            return
-        if not self.authorized(parsed):
-            self.send_json({"error": "unauthorized"}, status=401)
-            return
-        try:
-            content_length = int(self.headers.get("Content-Length", "0") or "0")
-            start = int(self.headers.get("X-Upload-Offset", "-1"))
-            upload = JOB_STORE.append_upload(upload_match.group(1), start, content_length, self.rfile)
-            self.send_json(public_upload(upload))
-        except KeyError as exc:
-            self.send_json({"error": str(exc)}, status=404)
-        except Exception as exc:
-            self.send_json({"error": str(exc)}, status=409 if "offset mismatch" in str(exc) else 400)
-
-    def read_json_body(self, allow_empty=False):
-        content_length = int(self.headers.get("Content-Length", "0") or "0")
-        if content_length <= 0:
-            if allow_empty:
-                return {}
-            raise ValueError("empty request")
-        if content_length > 16 * 1024 * 1024:
-            raise ValueError("request is too large")
-        body = self.rfile.read(content_length).decode("utf-8-sig")
-        value = json.loads(body)
-        if not isinstance(value, dict):
-            raise ValueError("JSON body must be an object")
-        return value
 
     def translate_and_send(self):
         content_length = int(self.headers.get("Content-Length", "0") or "0")
@@ -428,10 +246,10 @@ class TranscribeHandler(BaseHTTPRequestHandler):
             return write_chunked_temp_upload(self.rfile, extension)
         return write_temp_upload(self.rfile, extension, content_length)
 
-    def transcribe_and_send(self, video_path, video_title=""):
+    def transcribe_and_send(self, video_path):
         try:
             print(f"POST /transcribe sync file={video_path}", flush=True)
-            segments = transcribe(video_path, video_title=video_title)
+            segments = transcribe(video_path)
         except Exception as exc:
             print(f"POST /transcribe failed: {exc}", flush=True)
             self.send_json({"error": str(exc)}, status=500)
@@ -472,46 +290,12 @@ def guess_extension(content_type):
     return ".mp4"
 
 
-def decode_video_title(value):
-    try:
-        return unquote(str(value or "")).strip()[:300]
-    except Exception:
-        return str(value or "").strip()[:300]
-
-
-def build_transcription_context(video_title=""):
-    title = re.sub(r"[_\s]+", " ", str(video_title or "")).strip()
-    title = re.sub(r"\.(mp4|m4a|mov|mkv|webm)$", "", title, flags=re.IGNORECASE)
-    prompt_parts = [WHISPER_INITIAL_PROMPT] if WHISPER_INITIAL_PROMPT else []
-    hotword_parts = [WHISPER_HOTWORDS] if WHISPER_HOTWORDS else []
-    if title:
-        prompt_parts.append(f"The video title is: {title}.")
-        hotword_parts.append(title)
-    if re.search(
-        r"\b(hik|backpack|camp|trail|mountain|outdoor|gear|trek|switzerland|pakistan)\w*\b",
-        title,
-        flags=re.IGNORECASE,
-    ):
-        prompt_parts.append("Use accurate outdoor, hiking, camping and ultralight gear terminology.")
-        hotword_parts.append(OUTDOOR_HOTWORDS)
-    prompt = " ".join(part for part in prompt_parts if part).strip()
-    hotwords = ", ".join(part for part in hotword_parts if part).strip()
-    return prompt or None, hotwords or None
-
-
 def service_config():
     current_port = int(os.environ.get("WHISPER_PORT", "8765"))
     token_suffix = f"?token={AUTH_TOKEN}" if AUTH_TOKEN else ""
     config = {
         "token_required": bool(AUTH_TOKEN),
         "transcribe_urls": [f"http://127.0.0.1:{current_port}/transcribe{token_suffix}"],
-        "service_data_dir": SERVICE_DATA_DIR,
-        "capabilities": {
-            "durable_jobs": True,
-            "resumable_uploads": True,
-            "audio_cache": True,
-            "subtitle_cache": True,
-        },
     }
     try:
         with open(RUNTIME_CONFIG_PATH, "r", encoding="utf-8-sig") as handle:
@@ -570,218 +354,90 @@ def write_chunked_temp_upload(source, suffix):
     return path
 
 
-def public_upload(upload):
-    return {
-        "upload_id": upload["upload_id"],
-        "audio_hash": upload["audio_hash"],
-        "total_bytes": int(upload["total_bytes"]),
-        "offset": int(upload.get("offset", 0)),
-        "complete": bool(upload.get("complete", False)),
-        "audio_cached": bool(upload.get("complete", False)),
-    }
-
-
-def create_job(video_path, video_title="", mime_type="audio/mp4"):
-    upload = JOB_STORE.import_audio(video_path, mime_type, video_title)
-    job = submit_durable_job(upload, mode="generate", force=False, video_title=video_title)
-    return job["job_id"]
-
-
-def submit_durable_job(upload, mode="generate", force=False, video_title="", segments=None):
-    audio_hash = upload["audio_hash"]
-    active = JOB_STORE.find_active_job(audio_hash, mode)
-    if active is not None:
-        active["reused"] = True
-        return active
-    if mode == "generate" and not force:
-        cached = JOB_STORE.load_bilingual(audio_hash)
-        if isinstance(cached, list) and cached:
-            job = JOB_STORE.create_job(audio_hash, upload.get("audio_path", ""), video_title, mode, force)
-            JOB_STORE.finish_job(job["job_id"], cached)
-            finished = JOB_STORE.get_job(job["job_id"], include_result=False)
-            finished["reused"] = True
-            return finished
-    if mode == "retranslate":
-        if segments is not None and not isinstance(segments, list):
-            raise ValueError("segments must be a list")
-        if not segments:
-            segments = JOB_STORE.load_english(audio_hash)
-        if not isinstance(segments, list) or not segments:
-            raise ValueError("no saved English subtitles are available for retranslation")
-        JOB_STORE.save_english(audio_hash, segments)
-        payload = {"segments": segments}
-    else:
-        payload = None
-    job = JOB_STORE.create_job(
-        audio_hash,
-        upload.get("audio_path", ""),
-        video_title,
-        mode,
-        force,
-        input_payload=payload,
-    )
-    start_job_thread(job["job_id"])
-    return job
+def create_job(video_path):
+    job_id = uuid.uuid4().hex
+    with _jobs_lock:
+        _jobs[job_id] = {
+            "id": job_id,
+            "status": "queued",
+            "stage": "queued",
+            "progress": 0,
+            "message": "Queued",
+            "result": None,
+            "error": None,
+            "created_at": time.time(),
+            "updated_at": time.time(),
+        }
+    thread = threading.Thread(target=run_job, args=(job_id, video_path), daemon=True)
+    thread.start()
+    return job_id
 
 
 def get_job(job_id):
-    return JOB_STORE.get_job(job_id)
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+        return dict(job) if job is not None else None
 
 
 def update_job(job_id, **changes):
-    return JOB_STORE.update_job(job_id, **changes)
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+        if job is None:
+            return
+        job.update(changes)
+        job["updated_at"] = time.time()
 
 
-def start_job_thread(job_id):
-    thread = threading.Thread(target=run_job, args=(job_id,), daemon=True, name=f"caption-job-{job_id[:8]}")
-    thread.start()
-
-
-def run_job(job_id):
-    job = JOB_STORE.get_job(job_id, include_result=False)
-    if job is None:
-        return
-    video_path = job.get("audio_path", "")
-    video_title = job.get("video_title", "")
-    audio_hash = job.get("audio_hash", "")
-    mode = job.get("mode", "generate")
+def run_job(job_id, video_path):
     try:
-        with _job_execution_lock:
-            if mode == "generate" and (not video_path or not os.path.isfile(video_path)):
-                raise FileNotFoundError("saved audio file is missing")
-            print(f"[job {job_id}] mode={mode} audio={video_path}", flush=True)
-            update_job(job_id, status="running", stage="starting", progress=1, stage_progress=0, message="Preparing saved computer task")
-            write_runtime_status(
-                current_job_id=job_id,
-                job_status="running",
-                stage="starting",
-                progress=1,
-                message="Preparing saved computer task",
-                source_file=os.path.basename(video_path),
-                subtitle_count=0,
-                error="",
-            )
+        print(f"[job {job_id}] queued file={video_path}")
+        update_job(job_id, status="running", stage="starting", progress=1, message="Preparing uploaded file")
 
-            def progress(stage, percent, message):
-                print(f"[job {job_id}] {percent:03d}% {stage}: {message}", flush=True)
-                processed, total = progress_times(message)
-                stage_progress = stage_percent(stage, percent)
-                update_job(
-                    job_id,
-                    status="running",
-                    stage=stage,
-                    progress=percent,
-                    stage_progress=stage_progress,
-                    processed_seconds=processed,
-                    total_seconds=total,
-                    message=message,
-                )
-                write_runtime_status(current_job_id=job_id, job_status="running", stage=stage, progress=percent, message=message)
+        def progress(stage, percent, message):
+            print(f"[job {job_id}] {percent:03d}% {stage}: {message}", flush=True)
+            update_job(job_id, status="running", stage=stage, progress=percent, message=message)
 
-            if mode == "retranslate":
-                source = JOB_STORE.job_input(job_id).get("segments") or JOB_STORE.load_english(audio_hash)
-                if not source:
-                    raise ValueError("saved English subtitles are missing")
-                english = [dict(item, translation="") for item in source]
-                progress("translating", 92, "Translating saved English subtitles")
-                result = translate_segments(english, "en", progress)
-            else:
-                def save_english(segments):
-                    JOB_STORE.save_english(audio_hash, segments)
-                result = transcribe(video_path, progress, video_title, english_ready=save_english)
-            JOB_STORE.save_bilingual(audio_hash, result)
-            JOB_STORE.finish_job(job_id, result)
-            print(f"[job {job_id}] done segments={len(result)}", flush=True)
-            write_runtime_status(
-                current_job_id=job_id,
-                job_status="done",
-                stage="done",
-                progress=100,
-                message=f"Generated {len(result)} bilingual subtitles",
-                subtitle_count=len(result),
-                error="",
-            )
+        result = transcribe(video_path, progress)
+        print(f"[job {job_id}] done segments={len(result)}", flush=True)
+        update_job(
+            job_id,
+            status="done",
+            stage="done",
+            progress=100,
+            message=f"Generated {len(result)} subtitles",
+            result=result,
+        )
     except Exception as exc:
         print(f"[job {job_id}] error: {exc}", flush=True)
-        JOB_STORE.fail_job(job_id, exc)
-        write_runtime_status(
-            current_job_id=job_id,
-            job_status="error",
-            stage="error",
-            progress=100,
-            message=str(exc),
-            error=str(exc),
-        )
+        update_job(job_id, status="error", stage="error", progress=100, message=str(exc), error=str(exc))
+    finally:
+        try:
+            os.remove(video_path)
+        except OSError:
+            pass
 
 
-def progress_times(message):
-    match = re.search(r"(\d{2}):(\d{2})\s*/\s*(\d{2}):(\d{2})", str(message))
-    if not match:
-        return 0, 0
-    processed = int(match.group(1)) * 60 + int(match.group(2))
-    total = int(match.group(3)) * 60 + int(match.group(4))
-    return processed, total
-
-
-def stage_percent(stage, overall):
-    ranges = {
-        "detecting": (0, 10),
-        "loading": (0, 100),
-        "transcribing": (0, 100),
-        "postprocessing": (0, 100),
-        "translating": (0, 100),
-    }
-    if stage not in ranges:
-        return int(overall)
-    if stage == "transcribing":
-        return max(0, min(100, int((overall - 12) * 100 / 74)))
-    if stage == "translating":
-        return max(0, min(100, int((overall - 92) * 100 / 8)))
-    return int(overall)
-
-
-def recover_persistent_jobs():
-    for job in JOB_STORE.recoverable_jobs():
-        job_id = job["job_id"]
-        JOB_STORE.update_job(job_id, status="queued", stage="queued", message="Recovered after computer service restart")
-        start_job_thread(job_id)
-
-def transcribe(video_path, progress=None, video_title="", english_ready=None):
-    if WHISPER_FORCE_LANGUAGE and WHISPER_FORCE_LANGUAGE not in ("auto", "detect"):
-        language = WHISPER_FORCE_LANGUAGE
-        report(progress, "detecting", 6, f"Using configured language: {language}")
-    else:
-        report(progress, "detecting", 3, "Detecting language")
-        language = detect_language(video_path, progress)
+def transcribe(video_path, progress=None):
+    report(progress, "detecting", 3, "Detecting language")
+    language = detect_language(video_path, progress)
     model_name = choose_transcription_model(language)
     model_label = display_model_name(model_name)
-    write_runtime_status(subtitle_model=model_label, detected_language=language or "unknown")
     print(f"Selected subtitle model: {model_label}; detected language={language or 'unknown'}", flush=True)
     report(progress, "loading", 10, f"Loading subtitle model: {model_label} for {language or 'unknown'}")
     model = get_whisper_model(model_name)
     print(f"Transcribing {video_path} with {model_name}; detected language={language or 'unknown'}...")
     report(progress, "transcribing", 12, f"Generating subtitles with {model_label}")
-    initial_prompt, hotwords = build_transcription_context(video_title)
     segments, info = model.transcribe(
         video_path,
         language=language if language else None,
         beam_size=5,
         patience=1.2,
         vad_filter=True,
-        vad_parameters={
-            "min_silence_duration_ms": 400,
-            "speech_pad_ms": 150,
-        },
         word_timestamps=True,
         condition_on_previous_text=True,
-        prompt_reset_on_temperature=0.5,
-        initial_prompt=initial_prompt,
-        hotwords=hotwords,
-        temperature=(0.0, 0.2, 0.4, 0.6, 0.8, 1.0),
-        compression_ratio_threshold=1.35,
-        log_prob_threshold=-1.0,
-        no_speech_threshold=0.6,
-        hallucination_silence_threshold=1.0,
+        initial_prompt=WHISPER_INITIAL_PROMPT or None,
+        hotwords=WHISPER_HOTWORDS or None,
+        temperature=0.0,
     )
     duration = float(getattr(info, "duration", 0.0) or 0.0)
     raw_segments = []
@@ -792,7 +448,6 @@ def transcribe(video_path, progress=None, video_title="", english_ready=None):
             percent = 12 + int(min(1.0, max(0.0, float(segment.end) / duration)) * 74)
             report(progress, "transcribing", percent, f"{model_label}: {format_seconds(segment.end)} / {format_seconds(duration)}")
         words = getattr(segment, "words", None) or []
-        segment_word_start = len(raw_words)
         for word in words:
             word_text = " ".join(word.word.strip().split())
             if word_text:
@@ -803,7 +458,6 @@ def transcribe(video_path, progress=None, video_title="", english_ready=None):
                         "text": word_text,
                     }
                 )
-        preserve_segment_terminal_punctuation(raw_words, segment_word_start, text)
         if text:
             raw_segments.append(
                 {
@@ -816,11 +470,10 @@ def transcribe(video_path, progress=None, video_title="", english_ready=None):
     report(progress, "postprocessing", 88, "Post-processing subtitle timing")
     result = words_to_sentence_segments(raw_words) if raw_words else merge_sentence_segments(raw_segments)
     result = correct_recognized_captions(result)
+    result = merge_short_incomplete_segments(result)
     result = add_sentence_timing_padding(result)
-    if english_ready is not None:
-        english_ready(result)
     report(progress, "translating", 92, "Translating English subtitles")
-    result = translate_segments(result, language, progress)
+    result = translate_segments(result, language)
     print(f"Generated {len(result)} segments.")
     return result
 
@@ -868,11 +521,6 @@ def correct_recognized_caption_text(text):
     ]
     for pattern, replacement in replacements:
         text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
-    text = re.sub(r"\bwith\s+the\s*,\s*with\s+the\b", "with the", text, flags=re.IGNORECASE)
-    text = re.sub(r"\bi\b", "I", text)
-    first_alpha = re.search(r"[A-Za-z]", text)
-    if first_alpha and text[first_alpha.start()].islower():
-        text = text[: first_alpha.start()] + text[first_alpha.start()].upper() + text[first_alpha.start() + 1 :]
     return text
 
 
@@ -891,11 +539,6 @@ def detect_language(video_path, progress=None):
     )
     language = getattr(info, "language", None)
     probability = getattr(info, "language_probability", None)
-    write_runtime_status(
-        detector_model=display_model_name(detector_name),
-        detected_language=language or "unknown",
-        language_probability=probability,
-    )
     if language:
         print(f"Detected language={language}, probability={probability}")
     return language
@@ -914,13 +557,12 @@ def choose_language_detector_model():
 
 def choose_transcription_model(language):
     if language == "en":
-        preference = os.environ.get("WHISPER_ENGLISH_MODEL", "large-v3").strip().lower()
+        preference = os.environ.get("WHISPER_ENGLISH_MODEL", "distil-large-v3").strip().lower()
         english_models = {
             "distil": LOCAL_EN_DISTIL_LARGE_V3_MODEL_DIR,
             "distil-large": LOCAL_EN_DISTIL_LARGE_V3_MODEL_DIR,
             "distil-large-v3": LOCAL_EN_DISTIL_LARGE_V3_MODEL_DIR,
-            "large": LOCAL_EN_LARGE_V3_MODEL_DIR,
-            "large-v3": LOCAL_EN_LARGE_V3_MODEL_DIR,
+            "large-v3": LOCAL_EN_DISTIL_LARGE_V3_MODEL_DIR,
             "small": LOCAL_EN_SMALL_MODEL_DIR,
             "medium": LOCAL_EN_MEDIUM_MODEL_DIR,
         }
@@ -928,20 +570,17 @@ def choose_transcription_model(language):
         if preferred_model and model_dir_exists(preferred_model):
             return preferred_model
         fallback_orders = {
-            "small": (LOCAL_EN_SMALL_MODEL_DIR, LOCAL_EN_LARGE_V3_MODEL_DIR, LOCAL_EN_DISTIL_LARGE_V3_MODEL_DIR, LOCAL_EN_MEDIUM_MODEL_DIR),
-            "medium": (LOCAL_EN_MEDIUM_MODEL_DIR, LOCAL_EN_LARGE_V3_MODEL_DIR, LOCAL_EN_DISTIL_LARGE_V3_MODEL_DIR, LOCAL_EN_SMALL_MODEL_DIR),
-            "distil": (LOCAL_EN_DISTIL_LARGE_V3_MODEL_DIR, LOCAL_EN_LARGE_V3_MODEL_DIR, LOCAL_EN_MEDIUM_MODEL_DIR, LOCAL_EN_SMALL_MODEL_DIR),
-            "distil-large": (LOCAL_EN_DISTIL_LARGE_V3_MODEL_DIR, LOCAL_EN_LARGE_V3_MODEL_DIR, LOCAL_EN_MEDIUM_MODEL_DIR, LOCAL_EN_SMALL_MODEL_DIR),
-            "distil-large-v3": (LOCAL_EN_DISTIL_LARGE_V3_MODEL_DIR, LOCAL_EN_LARGE_V3_MODEL_DIR, LOCAL_EN_MEDIUM_MODEL_DIR, LOCAL_EN_SMALL_MODEL_DIR),
+            "small": (LOCAL_EN_SMALL_MODEL_DIR, LOCAL_EN_DISTIL_LARGE_V3_MODEL_DIR, LOCAL_EN_MEDIUM_MODEL_DIR),
+            "medium": (LOCAL_EN_MEDIUM_MODEL_DIR, LOCAL_EN_DISTIL_LARGE_V3_MODEL_DIR, LOCAL_EN_SMALL_MODEL_DIR),
         }
         fallback_order = fallback_orders.get(
             preference,
-            (LOCAL_EN_LARGE_V3_MODEL_DIR, LOCAL_EN_DISTIL_LARGE_V3_MODEL_DIR, LOCAL_EN_MEDIUM_MODEL_DIR, LOCAL_EN_SMALL_MODEL_DIR),
+            (LOCAL_EN_DISTIL_LARGE_V3_MODEL_DIR, LOCAL_EN_MEDIUM_MODEL_DIR, LOCAL_EN_SMALL_MODEL_DIR),
         )
         for model_dir in fallback_order:
             if model_dir_exists(model_dir):
                 return model_dir
-        return "large-v3"
+        return "distil-large-v3"
 
     if model_dir_exists(LOCAL_MULTI_MEDIUM_MODEL_DIR):
         return LOCAL_MULTI_MEDIUM_MODEL_DIR
@@ -975,24 +614,12 @@ def model_status():
         "english": choose_transcription_model("en"),
         "other": choose_transcription_model("zh"),
         "paths": {
-            "english_large_v3": LOCAL_EN_LARGE_V3_MODEL_DIR,
             "english_distil_large_v3": LOCAL_EN_DISTIL_LARGE_V3_MODEL_DIR,
             "english_medium": LOCAL_EN_MEDIUM_MODEL_DIR,
             "english_small": LOCAL_EN_SMALL_MODEL_DIR,
             "multilingual_medium": LOCAL_MULTI_MEDIUM_MODEL_DIR,
         },
     }
-
-
-def resolve_whisper_compute_type(requested_compute_type, device, model_name):
-    requested = str(requested_compute_type or "auto").strip().lower()
-    if requested != "auto":
-        return requested
-    if device != "cuda":
-        return "int8"
-    if display_model_name(model_name) == "faster-whisper-large-v3":
-        return "int8_float16"
-    return "float16"
 
 
 def get_whisper_model(model_name=None):
@@ -1011,14 +638,8 @@ def get_whisper_model(model_name=None):
 
         requested_device = os.environ.get("WHISPER_DEVICE", "auto")
         device = resolve_whisper_device(requested_device)
-        requested_compute_type = os.environ.get("WHISPER_COMPUTE_TYPE", "auto")
-        compute_type = resolve_whisper_compute_type(requested_compute_type, device, model_name)
-        write_runtime_status(
-            whisper_model=display_model_name(model_name),
-            whisper_device=device,
-            whisper_compute_type=compute_type,
-            message=f"Loading Whisper model {display_model_name(model_name)} on {device}/{compute_type}",
-        )
+        requested_compute_type = os.environ.get("WHISPER_COMPUTE_TYPE", "auto").strip().lower()
+        compute_type = ("float16" if device == "cuda" else "int8") if requested_compute_type == "auto" else requested_compute_type
         print(f"Loading Whisper model {model_name} on {device}/{compute_type}...")
         try:
             model = WhisperModel(model_name, device=device, compute_type=compute_type)
@@ -1029,12 +650,6 @@ def get_whisper_model(model_name=None):
                 device = "cpu"
                 compute_type = "int8" if requested_compute_type == "auto" else requested_compute_type
                 model = WhisperModel(model_name, device=device, compute_type=compute_type)
-                write_runtime_status(
-                    whisper_model=display_model_name(model_name),
-                    whisper_device=device,
-                    whisper_compute_type=compute_type,
-                    message=f"Loaded Whisper model {display_model_name(model_name)} on {device}/{compute_type}",
-                )
                 _models[model_name] = model
                 return model
             fallback_model = os.environ.get("WHISPER_FALLBACK_MODEL", "tiny.en")
@@ -1054,12 +669,6 @@ def get_whisper_model(model_name=None):
                     model = WhisperModel(fallback_model, device=device, compute_type=compute_type)
                 else:
                     raise
-        write_runtime_status(
-            whisper_model=display_model_name(model_name),
-            whisper_device=device,
-            whisper_compute_type=compute_type,
-            message=f"Loaded Whisper model {display_model_name(model_name)} on {device}/{compute_type}",
-        )
         _models[model_name] = model
         return model
 
@@ -1106,23 +715,21 @@ def is_cuda_runtime_error(exc):
 
 
 def default_whisper_model():
-    if model_dir_exists(LOCAL_EN_LARGE_V3_MODEL_DIR):
-        return LOCAL_EN_LARGE_V3_MODEL_DIR
     if model_dir_exists(LOCAL_EN_DISTIL_LARGE_V3_MODEL_DIR):
         return LOCAL_EN_DISTIL_LARGE_V3_MODEL_DIR
     if model_dir_exists(LOCAL_EN_MEDIUM_MODEL_DIR):
         return LOCAL_EN_MEDIUM_MODEL_DIR
     if model_dir_exists(LOCAL_EN_SMALL_MODEL_DIR):
         return LOCAL_EN_SMALL_MODEL_DIR
-    return "large-v3"
+    return "distil-large-v3"
 
 
-def translate_segments(segments, language="en", progress=None):
+def translate_segments(segments, language="en"):
     if not segments or language != "en" or TRANSLATION_PROVIDER in ("", "none", "off"):
         return segments
 
     try:
-        translations = translate_texts([segment["text"] for segment in segments], progress)
+        translations = translate_texts([segment["text"] for segment in segments])
     except Exception as exc:
         print(f"Translation failed: {exc}. Returning English captions only.")
         return segments
@@ -1137,7 +744,7 @@ def translate_segments(segments, language="en", progress=None):
     return translated
 
 
-def translate_texts(texts, progress=None):
+def translate_texts(texts):
     if not texts or TRANSLATION_PROVIDER in ("", "none", "off"):
         return ["" for _ in texts]
 
@@ -1150,29 +757,12 @@ def translate_texts(texts, progress=None):
         raise RuntimeError("no local English-to-Chinese translator is available")
 
     prepared_texts = [prepare_caption_for_translation(text) for text in texts]
-    write_runtime_status(
-        stage="translating",
-        message=f"Translating {len(texts)} subtitles",
-        translation_total=len(texts),
-        translation_done=0,
-        translation_model=display_model_name(TRANSLATION_MODEL),
-        translation_provider=TRANSLATION_PROVIDER,
-    )
     print(f"Translating {len(texts)} subtitles with {TRANSLATION_PROVIDER}/{display_model_name(TRANSLATION_MODEL)}; batch size={TRANSLATION_BATCH_SIZE}", flush=True)
     translated = [""] * len(texts)
-    if progress is not None and texts:
-        progress("translating", 92, f"Translating subtitles 0/{len(texts)}")
     for start in range(0, len(texts), TRANSLATION_BATCH_SIZE):
         batch = prepared_texts[start : start + TRANSLATION_BATCH_SIZE]
         end = min(start + len(batch), len(texts))
         print(f"Translation batch {start + 1}-{end}/{len(texts)}", flush=True)
-        write_runtime_status(
-            stage="translating",
-            message=f"Translation batch {start + 1}-{end}/{len(texts)}",
-            translation_total=len(texts),
-            translation_done=start,
-            translation_batch=f"{start + 1}-{end}/{len(texts)}",
-        )
         try:
             translations = translator(batch)
         except Exception as exc:
@@ -1180,17 +770,6 @@ def translate_texts(texts, progress=None):
         for offset, translation in enumerate(translations):
             index = start + offset
             translated[index] = polish_caption_translation(texts[index], prepared_texts[index], translation)
-        mapped_progress = 92 + int((end / max(1, len(texts))) * 7)
-        if progress is not None:
-            progress("translating", min(99, mapped_progress), f"Translating subtitles {end}/{len(texts)}")
-        write_runtime_status(
-            stage="translating",
-            progress=min(99, mapped_progress),
-            message=f"Translated {end}/{len(texts)} subtitles",
-            translation_total=len(texts),
-            translation_done=end,
-            translation_batch=f"{start + 1}-{end}/{len(texts)}",
-        )
     return translated
 
 
@@ -1206,12 +785,6 @@ def prepare_caption_for_translation(text):
         (r"\bgoogle\s+maps\s+it\b", "use Google Maps to figure it out"),
         (r"\bgoogle-map\s+it\b", "use Google Maps to figure it out"),
         (r"\bcoast\s+to\s+coast\b", "from one coast to the other coast"),
-        (r"\bDCF\b", "Dyneema Composite Fabric (DCF)"),
-        (r"\bstrength\s+to\s+weight\s+ratio\b", "strength-to-weight ratio"),
-        (r"\brunner['\u2019]s\s+high\b", "the euphoric feeling known as runner's high"),
-        (r"\bhiker['\u2019]s\s+high\b", "the euphoric feeling known as hiker's high"),
-        (r"\btrekking\s+poles?\b", "hiking trekking poles"),
-        (r"\bbackpacking\s+quilts?\b", "insulated backpacking quilts"),
     ]
     for pattern, replacement in replacements:
         text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
@@ -1227,13 +800,6 @@ def polish_caption_translation(original, prepared, translation):
     prepared_source = " ".join((prepared or "").split()).lower()
 
     fixed_sentences = [
-        (r"\bjoin me and my family today as we go on a camping and hiking\.?$", "\u4eca\u5929\u548c\u6211\u53ca\u5bb6\u4eba\u4e00\u8d77\u53bb\u9732\u8425\u5f92\u6b65\u5427\u3002"),
-        (r"\btrip to a beautiful glacier lake in canada\.?$", "\u524d\u5f80\u52a0\u62ff\u5927\u4e00\u5ea7\u7f8e\u4e3d\u7684\u51b0\u5ddd\u6e56\u3002"),
-        (r"\bso grab your backpack,?\.?$", "\u6240\u4ee5\u5e26\u4e0a\u4f60\u7684\u80cc\u5305\uff0c"),
-        (r"\ba tent,? your hiking boots,?\.?$", "\u4e00\u9876\u5e10\u7bf7\u548c\u4f60\u7684\u5f92\u6b65\u9774\uff0c"),
-        (r"\band (let['\u2019]s do it|let us go)\.?$", "\u6211\u4eec\u51fa\u53d1\u5427\u3002"),
-        (r"\byou['\u2019]re also going to need a good, warm winter jacket and sleeping bag\.?$", "\u4f60\u8fd8\u9700\u8981\u4e00\u4ef6\u4fdd\u6696\u7684\u51ac\u5b63\u5939\u514b\u548c\u4e00\u4e2a\u7761\u888b\u3002"),
-        (r"\boh my\.?$", "\u5929\u554a\u3002"),
         (
             r"\bbut we don't get to go straight (as the crow flies|in a straight line)\.?$",
             "但我们不能按直线距离直接过去。",
@@ -1309,31 +875,6 @@ def polish_caption_translation(original, prepared, translation):
     ]
     for old, new in replacements:
         text = text.replace(old, new)
-    return normalize_subtitle_chinese(text)
-
-
-def normalize_subtitle_chinese(text):
-    text = " ".join((text or "").split())
-    replacements = [
-        ("\u6293\u4f4f\u4f60\u7684\u80cc\u5305", "\u5e26\u4e0a\u4f60\u7684\u80cc\u5305"),
-        ("\u5305\u88c5\u4e86\u6211\u4eec\u7684\u718a\u55b7\u96fe", "\u5e26\u4e0a\u4e86\u9632\u718a\u55b7\u96fe"),
-        ("\u5305\u88c5\u718a\u55b7\u96fe", "\u5e26\u4e0a\u9632\u718a\u55b7\u96fe"),
-        ("\u51ac\u5b63\u514b", "\u51ac\u5b63\u5939\u514b"),
-        ("\u9732\u8425\u65c5\u884c", "\u9732\u8425\u4e4b\u65c5"),
-        ("\u9732\u8425\u662f\u6709\u8da3\u7684", "\u9732\u8425\u5f88\u6709\u8da3"),
-        ("\u8ba9\u6211\u4eec\u8fd9\u6837\u505a", "\u6211\u4eec\u51fa\u53d1\u5427"),
-    ]
-    for old, new in replacements:
-        text = text.replace(old, new)
-    text = re.sub(r"(?<!\u9632)\u718a\u55b7\u96fe", "\u9632\u718a\u55b7\u96fe", text)
-    if re.search(r"[\u3400-\u9fff]", text):
-        text = re.sub(r",\s*", "\uff0c", text)
-        text = re.sub(r"\.(?=$|\s)", "\u3002", text)
-        text = text.replace("?", "\uff1f").replace("!", "\uff01")
-        text = re.sub(r"(?<=[\u3400-\u9fff])\s+(?=[\u3400-\u9fff])", "", text)
-        text = re.sub(r"^[\uff0c\u3002\uff1b\uff1a\uff01\uff1f\s]+", "", text)
-        text = re.sub(r"([\uff0c\u3002\uff01\uff1f\uff1b\uff1a])\1+", r"\1", text)
-        text = re.sub(r"\uff0c(?=[\u3002\uff01\uff1f\uff1b\uff1a])", "", text)
     return text
 
 
@@ -1389,12 +930,6 @@ def build_transformers_translator():
     except ImportError:
         return None
 
-    write_runtime_status(
-        translation_provider="transformers",
-        translation_model=display_model_name(TRANSLATION_MODEL),
-        translation_device="loading",
-        message=f"Loading translation model {display_model_name(TRANSLATION_MODEL)}",
-    )
     print(f"Loading translation model {TRANSLATION_MODEL}...")
     tokenizer = load_pretrained(AutoTokenizer, TRANSLATION_MODEL)
     model = load_pretrained(AutoModelForSeq2SeqLM, TRANSLATION_MODEL)
@@ -1425,7 +960,7 @@ def build_transformers_translator():
     def translate_batch(texts):
         encoded = tokenizer(texts, return_tensors="pt", padding=True, truncation=True, max_length=512)
         encoded = {name: tensor.to(device) for name, tensor in encoded.items()}
-        generation_options = {"max_new_tokens": 256, "num_beams": 4, "length_penalty": 1.35, "early_stopping": False}
+        generation_options = {"max_new_tokens": 256, "num_beams": 4}
         if forced_bos_token_id is not None:
             generation_options["forced_bos_token_id"] = forced_bos_token_id
         with torch.inference_mode():
@@ -1433,13 +968,6 @@ def build_transformers_translator():
         return [text.strip() for text in tokenizer.batch_decode(generated, skip_special_tokens=True)]
 
     language_pair = f"{TRANSLATION_SOURCE_LANGUAGE}->{TRANSLATION_TARGET_LANGUAGE}" if is_nllb else "model default"
-    write_runtime_status(
-        translation_provider="transformers",
-        translation_model=display_model_name(TRANSLATION_MODEL),
-        translation_device=device,
-        translation_languages=language_pair,
-        message=f"Loaded translation model {display_model_name(TRANSLATION_MODEL)} on {device}",
-    )
     print(f"Using Transformers model {TRANSLATION_MODEL} on {device} ({language_pair}) for English-to-Chinese subtitles.")
     return translate_batch
 
@@ -1474,217 +1002,45 @@ def resolve_translation_device(torch_module, requested_device):
     return "cpu"
 
 
-def preserve_segment_terminal_punctuation(raw_words, segment_word_start, segment_text):
-    if len(raw_words) <= segment_word_start:
-        return
-    last_word = raw_words[-1]
-    last_word["segment_end"] = True
-    terminal_match = re.search(r"([,.!?;:])[\"')\]]*$", str(segment_text or "").strip())
-    if not terminal_match:
-        return
-    terminal = terminal_match.group(1)
-    last_word["segment_complete"] = terminal in ".!?"
-    if not re.search(r"[,.!?;:]$", last_word["text"].strip()):
-        last_word["text"] = last_word["text"].rstrip() + terminal
-
-
 def words_to_sentence_segments(words):
-    normalized_words = []
-    for raw_word in words:
-        text = str(raw_word.get("text", "")).strip()
+    result = []
+    current_words = []
+    current_start = None
+
+    for word in words:
+        text = word["text"].strip()
         if not text:
             continue
-        normalized_words.append(
+
+        if current_start is None:
+            current_start = word["start"]
+        current_words.append(word)
+
+        sentence_text = words_to_text(current_words)
+        duration = word["end"] - current_start
+        if is_sentence_complete(text) or should_force_word_break(sentence_text, duration):
+            result.append(
+                {
+                    "start": current_start,
+                    "end": word["end"],
+                    "text": sentence_text,
+                    "translation": "",
+                }
+            )
+            current_words = []
+            current_start = None
+
+    if current_words and current_start is not None:
+        result.append(
             {
-                "start": float(raw_word["start"]),
-                "end": float(raw_word["end"]),
-                "text": text,
-                "segment_end": bool(raw_word.get("segment_end", False)),
-                "segment_complete": bool(raw_word.get("segment_complete", False)),
+                "start": current_start,
+                "end": current_words[-1]["end"],
+                "text": words_to_text(current_words),
+                "translation": "",
             }
         )
 
-    result = []
-    current_words = []
-    for index, word in enumerate(normalized_words):
-        current_words.append(word)
-
-        while len(current_words) > 1 and subtitle_limits_exceeded(current_words):
-            split_at = find_preferred_word_boundary(current_words)
-            if split_at <= 0 or split_at >= len(current_words):
-                split_at = len(current_words) - 1
-            result.append(make_word_segment(current_words[:split_at]))
-            current_words = current_words[split_at:]
-
-        if current_words and is_sentence_complete(word["text"]):
-            result.append(make_word_segment(current_words))
-            current_words = []
-            continue
-
-        next_word = normalized_words[index + 1] if index + 1 < len(normalized_words) else None
-        if current_words and next_word and should_break_after_word(current_words, next_word):
-            result.append(make_word_segment(current_words))
-            current_words = []
-
-    if current_words:
-        result.append(make_word_segment(current_words))
-    return merge_short_incomplete_segments(result)
-
-
-def make_word_segment(words):
-    return {
-        "start": float(words[0]["start"]),
-        "end": float(words[-1]["end"]),
-        "text": words_to_text(words),
-        "translation": "",
-    }
-
-
-def word_buffer_duration(words):
-    if not words:
-        return 0.0
-    return float(words[-1]["end"]) - float(words[0]["start"])
-
-
-def weak_subtitle_ending(text):
-    matches = re.findall(r"[A-Za-z']+", text.lower())
-    if not matches:
-        return False
-    last_word = matches[-1]
-    return last_word.endswith("ing") or last_word in {
-        "a", "an", "the", "to", "of", "with", "for", "from", "into", "on", "in", "at", "by",
-        "and", "but", "or", "because", "that", "which", "who", "whom", "whose", "when", "if", "as",
-        "i", "you", "he", "she", "it", "we", "they", "this", "these", "those", "there",
-        "my", "your", "his", "her", "our", "their", "very", "really", "just", "kind", "sort",
-        "much", "many", "more", "most", "less", "good", "not", "no", "so", "too", "quite",
-        "am", "is", "are", "was", "were", "be", "been", "being",
-        "have", "has", "had", "do", "does", "did",
-        "can", "could", "will", "would", "shall", "should", "may", "might", "must",
-    }
-
-
-def starts_with_dependent_clause(text):
-    normalized = " ".join(re.findall(r"[A-Za-z']+", text.lower()))
-    return normalized.startswith("even though ") or normalized.startswith(
-        ("although ", "because ", "if ", "unless ", "while ", "when ", "whenever ", "since ")
-    )
-
-
-def incomplete_clause_ending(text):
-    stripped = text.strip()
-    return weak_subtitle_ending(stripped) or (
-        bool(SOFT_SENTENCE_END_RE.search(stripped)) and starts_with_dependent_clause(stripped)
-    )
-
-
-def starts_with_continuation(text):
-    first = re.sub(r"^[^A-Za-z]+", "", str(text or "")).lower()
-    return first in {
-        "of", "to", "from", "for", "with", "without", "than", "that", "which", "who", "whom",
-        "whose", "what", "where", "when", "why", "how",
-    }
-
-
-def should_break_after_word(current_words, next_word):
-    duration = word_buffer_duration(current_words)
-    if duration < MIN_SUBTITLE_SECONDS or len(current_words) < 3:
-        return False
-
-    current_text = words_to_text(current_words)
-    previous_text = current_words[-1]["text"].strip()
-    next_text = re.sub(r"^[^A-Za-z]+", "", next_word["text"]).lower()
-    gap = float(next_word["start"]) - float(current_words[-1]["end"])
-
-    if incomplete_clause_ending(current_text) or starts_with_continuation(next_text):
-        return False
-
-    if current_words[-1].get("segment_complete"):
-        return True
-    if (
-        current_words[-1].get("segment_end")
-        and duration >= TARGET_SUBTITLE_SECONDS
-        and gap >= SOFT_SILENCE_SECONDS
-    ):
-        return True
-
-    if gap >= ABSOLUTE_SILENCE_SECONDS:
-        return True
-
-    if SOFT_SENTENCE_END_RE.search(previous_text):
-        return duration >= PREFERRED_MAX_SUBTITLE_SECONDS or (
-            duration >= TARGET_SUBTITLE_SECONDS and gap >= SOFT_SILENCE_SECONDS
-        )
-
-    if gap >= SILENCE_BREAK_SECONDS and duration >= TARGET_SUBTITLE_SECONDS:
-        return True
-
-    clause_starters = {
-        "and", "but", "so", "because", "although", "though", "while",
-        "which", "who", "when", "where", "then", "however",
-    }
-    return (
-        next_text in clause_starters
-        and len(current_words) >= 6
-        and duration >= TARGET_SUBTITLE_SECONDS
-        and gap >= SOFT_SILENCE_SECONDS
-    )
-
-
-def subtitle_limits_exceeded(words):
-    if not words:
-        return False
-    return (
-        word_buffer_duration(words) > MAX_SUBTITLE_SECONDS
-        or len(words) > MAX_SUBTITLE_WORDS
-        or len(words_to_text(words)) > MAX_SUBTITLE_CHARS
-    )
-
-
-def find_preferred_word_boundary(words):
-    if len(words) < 4:
-        return len(words) - 1
-    best_index = 0
-    best_score = float("-inf")
-    upper = len(words) - 1
-    for split_at in range(3, upper + 1):
-        left = words[:split_at]
-        if word_buffer_duration(left) < MIN_SUBTITLE_SECONDS:
-            continue
-        left_text = words_to_text(left)
-        previous_text = left[-1]["text"].strip()
-        next_text = re.sub(r"^[^A-Za-z]+", "", words[split_at]["text"]).lower()
-        gap = float(words[split_at]["start"]) - float(left[-1]["end"])
-        duration = word_buffer_duration(left)
-        score = -abs(duration - TARGET_SUBTITLE_SECONDS)
-
-        if incomplete_clause_ending(left_text):
-            score -= 30.0
-        if starts_with_continuation(next_text):
-            score -= 18.0
-        if len(words) - split_at <= 2:
-            score -= 6.0
-
-        if is_sentence_complete(previous_text):
-            score += 24.0
-        elif SOFT_SENTENCE_END_RE.search(previous_text):
-            score += 10.0
-        if gap >= ABSOLUTE_SILENCE_SECONDS:
-            score += 14.0
-        elif gap >= SILENCE_BREAK_SECONDS:
-            score += 8.0
-        elif gap >= SOFT_SILENCE_SECONDS:
-            score += 3.0
-        if next_text in {"and", "but", "so", "because", "although", "which", "who", "when", "then"}:
-            score += 3.0
-        if duration > PREFERRED_MAX_SUBTITLE_SECONDS:
-            score += 2.0
-        if len(left) > PREFERRED_MAX_SUBTITLE_WORDS or len(left_text) > PREFERRED_MAX_SUBTITLE_CHARS:
-            score -= 2.0
-        if score > best_score:
-            best_score = score
-            best_index = split_at
-    return best_index
-
+    return result
 
 
 def words_to_text(words):
@@ -1699,7 +1055,7 @@ def words_to_text(words):
 def should_force_word_break(text, duration):
     if is_sentence_complete(text):
         return True
-    return duration >= MAX_SUBTITLE_SECONDS or len(text) >= MAX_SUBTITLE_CHARS
+    return duration >= MAX_SENTENCE_SECONDS or len(text) >= MAX_SENTENCE_CHARS
 
 
 def merge_short_incomplete_segments(segments):
@@ -1723,28 +1079,12 @@ def merge_short_incomplete_segments(segments):
 
 def should_merge_short_incomplete(current, next_segment):
     text = current["text"].strip()
-    next_text = next_segment["text"].strip()
-    if not text or not next_text or is_sentence_complete(text):
+    if not text or is_sentence_complete(text):
         return False
-
     gap = float(next_segment["start"]) - float(current["end"])
-    combined_text = join_text(text, next_text)
-    combined_duration = float(next_segment["end"]) - float(current["start"])
-    combined_words = len([part for part in combined_text.split() if part])
-    if (
-        gap > ABSOLUTE_SILENCE_SECONDS
-        or combined_duration > MAX_SUBTITLE_SECONDS
-        or combined_words > MAX_SUBTITLE_WORDS
-        or len(combined_text) > MAX_SUBTITLE_CHARS
-    ):
-        return False
-
-    next_word_count = len([part for part in next_text.split() if part])
-    return (
-        incomplete_clause_ending(text)
-        or starts_with_continuation(next_text)
-        or next_word_count <= 2
-    )
+    word_count = len([part for part in text.split() if part])
+    combined_length = len(text) + 1 + len(next_segment["text"].strip())
+    return gap <= 1.5 and combined_length <= 140 and (word_count <= 3 or len(text) <= 24)
 
 
 def merge_sentence_segments(raw_segments):
@@ -1768,7 +1108,7 @@ def merge_sentence_segments(raw_segments):
             current["text"] = join_text(current["text"], text)
 
         duration = current["end"] - current["start"]
-        if is_sentence_complete(current["text"]) or duration >= MAX_SUBTITLE_SECONDS or len(current["text"]) >= MAX_SUBTITLE_CHARS:
+        if is_sentence_complete(current["text"]) or duration >= MAX_SENTENCE_SECONDS or len(current["text"]) >= MAX_SENTENCE_CHARS:
             result.append(clean_caption(current))
             current = None
 
@@ -1803,7 +1143,7 @@ def split_overlong_captions(segments):
     result = []
     for segment in segments:
         text = segment["text"]
-        if len(text) <= MAX_SUBTITLE_CHARS:
+        if len(text) <= MAX_SENTENCE_CHARS:
             result.append(segment)
             continue
 
@@ -1836,7 +1176,7 @@ def split_text_at_soft_boundaries(text):
     current = ""
     for piece in re.split(r"(?<=[,;:])\s+", text):
         candidate = piece if not current else f"{current} {piece}"
-        if len(candidate) <= MAX_SUBTITLE_CHARS:
+        if len(candidate) <= MAX_SENTENCE_CHARS:
             current = candidate
         else:
             if current:
@@ -1880,27 +1220,11 @@ def add_sentence_timing_padding(segments):
 def main():
     host = os.environ.get("WHISPER_HOST", "0.0.0.0")
     port = int(os.environ.get("WHISPER_PORT", "8765"))
-    configured_english_model = os.environ.get("WHISPER_ENGLISH_MODEL", "large-v3")
-    selected_english_model = display_model_name(choose_transcription_model("en"))
-    write_runtime_status(
-        service="running",
-        port=str(port),
-        configured_english_model=configured_english_model,
-        whisper_model=selected_english_model,
-        subtitle_model=selected_english_model,
-        job_status="idle",
-        stage="idle",
-        progress=0,
-        message="Waiting for a phone request",
-    )
-    recover_persistent_jobs()
     server = ThreadingHTTPServer((host, port), TranscribeHandler)
     print(f"Whisper service running at http://{host}:{port}")
     print("GET  /ping")
     print("GET  /transcribe?video=backpacking keeps the old local-file debug flow.")
     print("POST /transcribe accepts an uploaded video/audio file from the phone.")
-    print("POST /uploads + PUT /uploads/<sha256> support resumable audio uploads.")
-    print(f"Persistent audio, jobs, and subtitles: {SERVICE_DATA_DIR}")
     print("Set WHISPER_AUTH_TOKEN before exposing this service to the internet.")
     server.serve_forever()
 

@@ -97,6 +97,20 @@ v1.0.0 是早期版本，功能集中在单个学习页面里。
 
 安装包位置：`release/app-v1.0.0.apk`
 
+## APK 与电脑端服务兼容性
+
+仓库同时保留旧版和 v2.0.2 两套电脑端文件，不会删除 GitHub 上现有的旧源码与旧服务。不同版本的手机端协议不同，请按下表成套使用，不要交叉混用。
+
+| 手机 APK | 电脑端启动入口 | 实际服务源码 | 说明 |
+| --- | --- | --- | --- |
+| `release/app-v1.0.0.apk`、`release/app-v2.0.0.apk` | `tools/start_video_english_service.ps1` | `tools/local_whisper_service.py` | GitHub 原有旧版组合，文件继续保留 |
+| `release/app-v2.0.1.apk` | `tools/start_video_english_service.ps1` | `tools/local_whisper_service.py` | 仍使用旧协议；如需完全复现当时行为，建议使用 v2.0.1 发布时的提交 |
+| `release/app-v2.0.2.apk` | `tools/start_video_english_service_v2.0.2.ps1` | `tools/local_whisper_service_v2.0.2.py` | 当前推荐组合，支持断点上传、电脑持久化任务、音频/字幕缓存复用和离线进度恢复 |
+
+升级到 v2.0.2 时，请先等待旧电脑端任务结束并按 `Ctrl + C` 关闭旧服务，再安装 `app-v2.0.2.apk`，最后运行 v2.0.2 启动脚本。旧 APK、旧启动脚本和旧服务源码都可以继续保留，但两套服务不能同时占用默认的 8765 端口。
+
+升级不会主动删除手机里已有的视频、字幕、学习进度或单词本。v2.0.2 新增的电脑端缓存从 `service_data` 开始建立；旧服务临时目录中的音频不会自动迁移。
+
 ## 推荐使用流程
 
 ### 第一步：在电脑端启动服务
@@ -105,7 +119,7 @@ v1.0.0 是早期版本，功能集中在单个学习页面里。
 
 ```powershell
 cd C:\tmp\video-english-learning-remote
-powershell -ExecutionPolicy Bypass -File tools/start_video_english_service.ps1
+powershell -ExecutionPolicy Bypass -File tools/start_video_english_service_v2.0.2.ps1
 ```
 
 这个脚本会同时启动字幕识别、中文翻译和连接服务。正常启动后，PowerShell 窗口会显示三类地址：
@@ -210,10 +224,10 @@ GitHub 链接用于查看开源项目和下载最新版本安装包。
 
 ```powershell
 cd C:\tmp\video-english-learning-remote
-powershell -ExecutionPolicy Bypass -File tools/start_video_english_service.ps1
+powershell -ExecutionPolicy Bypass -File tools/start_video_english_service_v2.0.2.ps1
 ```
 
-启动命令没有变化。保持这个 PowerShell 窗口打开，电脑端会显示当前模型、连接地址、GPU 使用情况、识别进度和翻译进度。
+v2.0.2 的启动入口已带版本号。保持这个 PowerShell 窗口打开，电脑端会显示当前模型、连接地址、GPU 使用情况、识别进度和翻译进度。
 
 ### 电脑端持久化目录
 
@@ -233,7 +247,7 @@ service_data/
 
 ```powershell
 $env:VIDEO_ENGLISH_DATA_DIR="D:\video-english-service-data"
-powershell -ExecutionPolicy Bypass -File tools/start_video_english_service.ps1
+powershell -ExecutionPolicy Bypass -File tools/start_video_english_service_v2.0.2.ps1
 ```
 
 删除 `service_data`（或你自定义的目录）会清除电脑端音频、任务和字幕缓存；不会删除手机里的视频及已经保存到手机的字幕。
@@ -405,8 +419,10 @@ cd C:\tmp\video-english-learning-remote
 电脑端服务主要文件：
 
 ```text
-tools/start_video_english_service.ps1
-tools/local_whisper_service.py
+tools/start_video_english_service_v2.0.2.ps1
+tools/local_whisper_service_v2.0.2.py
+tools/start_video_english_service.ps1          旧版入口（保留）
+tools/local_whisper_service.py                 旧版服务（保留）
 tools/test_gpu_models.ps1
 ```
 

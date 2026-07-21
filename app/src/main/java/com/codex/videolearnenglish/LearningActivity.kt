@@ -699,7 +699,7 @@ class LearningActivity : Activity() {
         list.addView(authorCard())
         list.addView(menuCard("单词本", "快速打开查词记录，按日期复习字幕里的单词和短语") { showWordbook() })
         list.addView(menuCard("使用说明", "进入详细说明页：学习、批量生成字幕、电脑端服务、导出字幕") { showUsagePage() })
-        list.addView(menuCard("电脑端服务", "运行 start_video_english_service.ps1 后，App 会优先使用 USB / 局域网 / 公网") { showServiceUrlDialog() })
+        list.addView(menuCard("电脑端服务", "运行 start_video_english_service_v2.0.2.ps1 后，App 会优先使用 USB / 局域网 / 公网") { showServiceUrlDialog() })
         list.addView(menuCard("下载最新版", "打开 GitHub 项目 release 文件夹，下载作者更新的最新 APK") {
             openGitHubProject()
         })
@@ -1190,7 +1190,7 @@ class LearningActivity : Activity() {
         list.addView(infoCard("学习页", "导入或从“已完成”打开视频后，可以播放、上一句、下一句、循环、复读、早/晚 0.5 秒、切换英文/中文/双语、查单词和导出字幕。"))
         list.addView(infoCard("生成字幕中", "点“添加视频”可以一次选择多个视频。App 会后台依次提取音频，上传到电脑端 Whisper，生成英文字幕后自动调用电脑端翻译成中文。任务失败会自动续跑数次，也可以手动暂停、继续或重试。"))
         list.addView(infoCard("已完成", "已生成字幕的视频会集中在这里。可以开始学习、导出字幕、重新电脑端翻译或删除记录。删除时可选择只删任务记录，或连本地字幕缓存一起删除。"))
-        list.addView(infoCard("电脑端服务", "在电脑 PowerShell 运行：\ncd C:\\tmp\\video-english-learning-remote\npowershell -ExecutionPolicy Bypass -File tools/start_video_english_service.ps1\n\n手机 USB 连接时优先走 USB；同一局域网走局域网；外网/流量可走 Cloudflare 公网兜底。PowerShell 窗口不要关闭。"))
+        list.addView(infoCard("电脑端服务", "在电脑 PowerShell 运行：\ncd C:\\tmp\\video-english-learning-remote\npowershell -ExecutionPolicy Bypass -File tools/start_video_english_service_v2.0.2.ps1\n\n手机 USB 连接时优先走 USB；同一局域网走局域网；外网/流量可走 Cloudflare 公网兜底。PowerShell 窗口不要关闭。"))
         list.addView(infoCard("单词本", "在学习页点当前句里的单词或短语会自动保存。可在“我的 > 单词本”按日期复习，并跳回原视频例句。"))
         list.addView(infoCard("下载最新版", "在 GitHub 的 release 文件夹下载最新 APK：\nhttps://github.com/qiangge9468-collab/video-english-learning/tree/main/release"))
         scroll.addView(list)
@@ -1211,7 +1211,7 @@ class LearningActivity : Activity() {
             4. 电脑端服务
             在电脑 PowerShell 运行：
             cd C:\tmp\video-english-learning-remote
-            powershell -ExecutionPolicy Bypass -File tools/start_video_english_service.ps1
+            powershell -ExecutionPolicy Bypass -File tools/start_video_english_service_v2.0.2.ps1
             手机 USB 连接时优先走 USB；同一局域网走局域网；外网/流量可走 Cloudflare 公网兜底。PowerShell 窗口不要关闭。
 
             5. 单词本
