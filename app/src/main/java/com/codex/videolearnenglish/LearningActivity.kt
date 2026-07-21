@@ -1,4 +1,4 @@
-﻿package com.codex.videolearnenglish
+package com.codex.videolearnenglish
 
 import android.Manifest
 import android.app.AlertDialog
@@ -9,6 +9,7 @@ import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.SurfaceTexture
 import android.graphics.Matrix
 import android.graphics.drawable.GradientDrawable
@@ -92,7 +93,7 @@ class LearningActivity : Activity() {
     private var selectedIndex = -1
     private var displayMode = DisplayMode.ENGLISH
     private var showCurrentTranslation = false
-    private var loopSentence = true
+    private var loopSentence = false
     private var normalPlayback = false
     private var subtitleOffsetMs = 0
     private var textToSpeech: TextToSpeech? = null
@@ -146,8 +147,8 @@ class LearningActivity : Activity() {
     private val legacyEmulatorServiceUrl = "http://10.0.2.2:8765/transcribe?video=backpacking"
     private val subtitleCacheDirName = "subtitles_cache"
     private val wordbookFileName = "wordbook_history.json"
-    private val sentenceEndTrimMs = 250
-    private val nextSentenceGuardMs = 80
+    private val sentenceTailGraceMs = 160
+    private val nextSentenceGuardMs = 60
     private val seekBarProgressMax = 1000
     private val progressWatcher = object : Runnable {
         override fun run() {
@@ -157,7 +158,7 @@ class LearningActivity : Activity() {
                 if (pauseAtVideoTrackEndIfNeeded(currentMs)) {
                     updatePlaybackSeekBar()
                     updateButtons()
-                    handler.postDelayed(this, 120)
+                    handler.postDelayed(this, 50)
                     return
                 }
                 val index = currentSubtitleIndex(currentMs)
@@ -183,7 +184,7 @@ class LearningActivity : Activity() {
             }
             updatePlaybackSeekBar()
             updateButtons()
-            handler.postDelayed(this, 120)
+            handler.postDelayed(this, 50)
         }
     }
     private var captionReceiverRegistered = false
@@ -191,20 +192,14 @@ class LearningActivity : Activity() {
         override fun onReceive(context: android.content.Context?, intent: Intent?) {
             when (intent?.action) {
                 CaptionGenerationService.ACTION_PROGRESS -> {
-                    if (currentTab == MainTab.LEARNING && ::statusText.isInitialized) {
-                        statusText.text = intent.getStringExtra(CaptionGenerationService.EXTRA_MESSAGE).orEmpty()
-                    }
                     renderCurrentTaskTabThrottled()
                 }
                 CaptionGenerationService.ACTION_DONE -> {
                     val uriText = intent.getStringExtra(CaptionGenerationService.EXTRA_VIDEO_URI)
                     val count = intent.getIntExtra(CaptionGenerationService.EXTRA_COUNT, 0)
-                    if (uriText == currentVideoUri?.toString()) {
-                        val message = currentVideoUri?.let { loadCachedSubtitles(it) }
-                        statusText.text = message ?: "字幕已生成并缓存 $count 条。"
-                    } else {
-                        statusText.text = "字幕已在后台生成完成，重新导入对应视频会自动加载。"
-                    }
+                    if (uriText == currentVideoUri?.toString()) currentVideoUri?.let { loadCachedSubtitles(it) }
+                    Toast.makeText(this@LearningActivity, "后台字幕已完成：$count 句", Toast.LENGTH_SHORT).show()
+
                     renderCurrentTaskTab()
                 }
                 CaptionGenerationService.ACTION_TRANSLATION_DONE -> {
@@ -212,12 +207,9 @@ class LearningActivity : Activity() {
                     val uriText = intent.getStringExtra(CaptionGenerationService.EXTRA_VIDEO_URI)
                     val count = intent.getIntExtra(CaptionGenerationService.EXTRA_COUNT, 0)
                     val source = intent.getStringExtra(CaptionGenerationService.EXTRA_MESSAGE).orEmpty()
-                    if (uriText == currentVideoUri?.toString()) {
-                        currentVideoUri?.let { loadCachedSubtitles(it) }
-                        statusText.text = "已用${source}完成 $count 句中文翻译，并缓存到本机。"
-                    } else {
-                        statusText.text = "后台翻译已完成，重新导入对应视频会自动加载。"
-                    }
+                    if (uriText == currentVideoUri?.toString()) currentVideoUri?.let { loadCachedSubtitles(it) }
+                    Toast.makeText(this@LearningActivity, "${source}翻译已完成：$count 句", Toast.LENGTH_SHORT).show()
+
                     renderCurrentTaskTab()
                 }
                 CaptionGenerationService.ACTION_ERROR -> {
@@ -232,7 +224,6 @@ class LearningActivity : Activity() {
                     } else {
                         "后台任务失败"
                     }
-                    statusText.text = "$label：$message"
                     Toast.makeText(this@LearningActivity, "$label：$message", Toast.LENGTH_LONG).show()
                     renderCurrentTaskTab()
                 }
@@ -256,6 +247,16 @@ class LearningActivity : Activity() {
         saveLearningState()
         clearKeepScreenOn()
         super.onPause()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (!CaptionGenerationService.isActive()) {
+            CaptionTaskStore.recoverable(this)?.let { task ->
+                startCaptionTaskService(task)
+            }
+        }
+        renderCurrentTaskTab()
     }
 
     override fun onNewIntent(intent: Intent?) {
@@ -518,7 +519,7 @@ class LearningActivity : Activity() {
                 true
             }
         }
-        loopButton = controlButton("Loop On") {
+        loopButton = controlButton("单次") {
             loopSentence = !loopSentence
             updateButtons()
         }
@@ -531,7 +532,7 @@ class LearningActivity : Activity() {
         subtitleControls.addView(modeButton)
         subtitleControls.addView(loopButton)
         subtitleControls.addView(controlButton("复读") { replaySelected() })
-        val generateButton = controlButton("生成") { generateCaptions() }.apply {
+        val generateButton = controlButton("生成+") { generateCaptions() }.apply {
             setOnLongClickListener {
                 showServiceUrlDialog()
                 true
@@ -689,7 +690,7 @@ class LearningActivity : Activity() {
         list.addView(authorCard())
         list.addView(menuCard("单词本", "快速打开查词记录，按日期复习字幕里的单词和短语") { showWordbook() })
         list.addView(menuCard("使用说明", "进入详细说明页：学习、批量生成字幕、电脑端服务、导出字幕") { showUsagePage() })
-        list.addView(menuCard("电脑端服务", "运行 start_video_english_service.ps1 后，App 会优先使用 USB / 局域网 / 公网") { showServiceUrlDialog() })
+        list.addView(menuCard("电脑端服务", "运行 start_video_english_service_v2.0.2.ps1 后，App 会优先使用 USB / 局域网 / 公网") { showServiceUrlDialog() })
         list.addView(menuCard("下载最新版", "打开 GitHub 项目 release 文件夹，下载作者更新的最新 APK") {
             openGitHubProject()
         })
@@ -710,7 +711,17 @@ class LearningActivity : Activity() {
             setPadding(12, 0, 0, 0)
         }
         info.addView(cardTitle(task.title))
-        info.addView(cardMeta("阶段：${task.stage}"))
+        info.addView(cardMeta("\u9636\u6bb5\uff1a${task.stage}\uff5c\u603b\u8fdb\u5ea6\uff1a${task.progress.coerceIn(0, 100)}%"))
+        if (task.totalBytes > 0L) {
+            val uploadPercent = (task.uploadedBytes.coerceIn(0L, task.totalBytes) * 100 / task.totalBytes).toInt()
+            info.addView(cardMeta("音频上传：$uploadPercent%（${formatBytes(task.uploadedBytes)} / ${formatBytes(task.totalBytes)}）"))
+        }
+        if (task.remoteJobId.isNotBlank()) {
+            val syncedAt = if (task.remoteUpdatedAt > 0L) {
+                SimpleDateFormat("HH:mm:ss", Locale.CHINA).format(Date(task.remoteUpdatedAt))
+            } else "等待首次同步"
+            info.addView(cardMeta("电脑任务：${task.remoteJobId.take(8)}…｜最后同步：$syncedAt"))
+        }
         info.addView(cardMeta(task.message.ifBlank { task.status.id }))
         top.addView(info, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         if (task.connectionLabel.isNotBlank()) top.addView(badge(task.connectionLabel))
@@ -756,6 +767,7 @@ class LearningActivity : Activity() {
         val actions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         actions.addView(smallButton("开始学习") { openCompletedTask(task) })
         actions.addView(smallButton("导出") { openCompletedTask(task, exportAfterLoad = true) })
+        actions.addView(smallButton("重生成") { showRegenerateTaskDialog(task) })
         actions.addView(smallButton("重翻") { retranslateTask(task) })
         actions.addView(smallButton("删除") { showDeleteTaskDialog(task) })
         card.addView(actions)
@@ -895,16 +907,20 @@ class LearningActivity : Activity() {
         frame.addView(image, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
         val uri = runCatching { Uri.parse(uriText) }.getOrNull() ?: return frame
         val file = thumbnailCacheFile(uri)
-        if (file.exists() && file.length() > 0L) {
-            image.setImageURI(Uri.fromFile(file))
+        val cached = file.takeIf { it.exists() && it.length() > 0L }
+            ?.let { BitmapFactory.decodeFile(it.absolutePath) }
+        if (cached != null) {
+            image.setImageBitmap(cached)
             image.visibility = View.VISIBLE
             return frame
         }
         Thread {
             if (generateThumbnail(uri, file)) {
                 runOnUiThread {
-                    image.setImageURI(Uri.fromFile(file))
-                    image.visibility = View.VISIBLE
+                    BitmapFactory.decodeFile(file.absolutePath)?.let { bitmap ->
+                        image.setImageBitmap(bitmap)
+                        image.visibility = View.VISIBLE
+                    }
                 }
             }
         }.start()
@@ -915,7 +931,19 @@ class LearningActivity : Activity() {
         val retriever = MediaMetadataRetriever()
         return try {
             retriever.setDataSource(this, uri)
-            val bitmap = retriever.getFrameAtTime(0, MediaMetadataRetriever.OPTION_CLOSEST_SYNC) ?: return false
+            var fallback: Bitmap? = null
+            var selected: Bitmap? = null
+            for (timeUs in longArrayOf(0L, 500_000L, 1_000_000L, 2_000_000L)) {
+                val candidate = retriever.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC) ?: continue
+                if (fallback == null) fallback = candidate
+                if (!isMostlyBlack(candidate)) {
+                    selected = candidate
+                    break
+                }
+                if (candidate !== fallback) candidate.recycle()
+            }
+            val bitmap = selected ?: fallback ?: return false
+            if (selected != null && fallback != null && fallback !== selected) fallback.recycle()
             val scaled = scaleBitmapForCard(bitmap)
             output.parentFile?.mkdirs()
             FileOutputStream(output).use { stream ->
@@ -929,6 +957,26 @@ class LearningActivity : Activity() {
         } finally {
             runCatching { retriever.release() }
         }
+    }
+
+    private fun isMostlyBlack(bitmap: Bitmap): Boolean {
+        val stepX = (bitmap.width / 12).coerceAtLeast(1)
+        val stepY = (bitmap.height / 8).coerceAtLeast(1)
+        var dark = 0
+        var sampled = 0
+        var y = stepY / 2
+        while (y < bitmap.height) {
+            var x = stepX / 2
+            while (x < bitmap.width) {
+                val color = bitmap.getPixel(x, y)
+                val brightness = (android.graphics.Color.red(color) + android.graphics.Color.green(color) + android.graphics.Color.blue(color)) / 3
+                if (brightness < 18) dark += 1
+                sampled += 1
+                x += stepX
+            }
+            y += stepY
+        }
+        return sampled > 0 && dark * 100 / sampled >= 88
     }
 
     private fun scaleBitmapForCard(bitmap: Bitmap): Bitmap {
@@ -947,7 +995,7 @@ class LearningActivity : Activity() {
     private fun thumbnailCacheFile(uri: Uri): File {
         val digest = MessageDigest.getInstance("SHA-256").digest(uri.toString().toByteArray(Charsets.UTF_8))
         val name = digest.joinToString("") { "%02x".format(it) }
-        return File(File(cacheDir, "video_thumbnails").apply { mkdirs() }, "$name.jpg")
+        return File(File(cacheDir, "video_thumbnails_v2").apply { mkdirs() }, "$name.jpg")
     }
 
     private fun illustratedEmptyState(message: String): LinearLayout = LinearLayout(this).apply {
@@ -1059,6 +1107,28 @@ class LearningActivity : Activity() {
         }, 500)
     }
 
+    private fun showRegenerateTaskDialog(task: CaptionTask) {
+        AlertDialog.Builder(this)
+            .setTitle("重新生成双语字幕")
+            .setMessage("将重新提取音频，用电脑端 Whisper 识别全部英文，并重新翻译全部中文。旧字幕会保留到新双语字幕完整生成后再替换；锁屏后任务也会继续。")
+            .setPositiveButton("重新识别并翻译") { _, _ ->
+                val queued = CaptionTaskStore.enqueue(
+                    this,
+                    Uri.parse(task.uri),
+                    task.title,
+                    CaptionGenerationService.TASK_GENERATE,
+                    resetFailures = true
+                )
+                startCaptionTaskService(queued)
+                currentTab = MainTab.PROCESSING
+                buildUi()
+                Toast.makeText(this, "已开始重新识别并翻译，旧字幕暂时保留。", Toast.LENGTH_LONG).show()
+            }
+            .setNeutralButton("仅重翻中文") { _, _ -> retranslateTask(task) }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
     private fun openCompletedTask(task: CaptionTask, exportAfterLoad: Boolean = false) {
         currentTab = MainTab.LEARNING
         buildUi()
@@ -1147,7 +1217,7 @@ class LearningActivity : Activity() {
         list.addView(infoCard("学习页", "导入或从“已完成”打开视频后，可以播放、上一句、下一句、循环、复读、早/晚 0.5 秒、切换英文/中文/双语、查单词和导出字幕。"))
         list.addView(infoCard("生成字幕中", "点“添加视频”可以一次选择多个视频。App 会后台依次提取音频，上传到电脑端 Whisper，生成英文字幕后自动调用电脑端翻译成中文。任务失败会自动续跑数次，也可以手动暂停、继续或重试。"))
         list.addView(infoCard("已完成", "已生成字幕的视频会集中在这里。可以开始学习、导出字幕、重新电脑端翻译或删除记录。删除时可选择只删任务记录，或连本地字幕缓存一起删除。"))
-        list.addView(infoCard("电脑端服务", "在电脑 PowerShell 运行：\ncd C:\\tmp\\video-english-learning-remote\npowershell -ExecutionPolicy Bypass -File tools/start_video_english_service.ps1\n\n手机 USB 连接时优先走 USB；同一局域网走局域网；外网/流量可走 Cloudflare 公网兜底。PowerShell 窗口不要关闭。"))
+        list.addView(infoCard("电脑端服务", "在电脑 PowerShell 运行：\ncd C:\\tmp\\video-english-learning-remote\npowershell -ExecutionPolicy Bypass -File tools/start_video_english_service_v2.0.2.ps1\n\n手机 USB 连接时优先走 USB；同一局域网走局域网；外网/流量可走 Cloudflare 公网兜底。PowerShell 窗口不要关闭。"))
         list.addView(infoCard("单词本", "在学习页点当前句里的单词或短语会自动保存。可在“我的 > 单词本”按日期复习，并跳回原视频例句。"))
         list.addView(infoCard("下载最新版", "在 GitHub 的 release 文件夹下载最新 APK：\nhttps://github.com/qiangge9468-collab/video-english-learning/tree/main/release"))
         scroll.addView(list)
@@ -1168,7 +1238,7 @@ class LearningActivity : Activity() {
             4. 电脑端服务
             在电脑 PowerShell 运行：
             cd C:\tmp\video-english-learning-remote
-            powershell -ExecutionPolicy Bypass -File tools/start_video_english_service.ps1
+            powershell -ExecutionPolicy Bypass -File tools/start_video_english_service_v2.0.2.ps1
             手机 USB 连接时优先走 USB；同一局域网走局域网；外网/流量可走 Cloudflare 公网兜底。PowerShell 窗口不要关闭。
 
             5. 单词本
@@ -1423,13 +1493,17 @@ class LearningActivity : Activity() {
     }
 
     private fun showLookup(term: String) {
-        val result = dictionary.lookup(term)
+        val result = dictionary.lookupRich(term)
         saveWordbookEntry(result, currentWordbookContext())
         val message = buildString {
-            if (result.phonetic.isNotBlank()) append(result.phonetic).append("\n\n")
-            append(result.meaning)
+            if (result.lemma.isNotBlank() && result.lemma != result.term) {
+                append("\u539f\u5f62\uff1a").append(result.lemma).append("\n")
+            }
+            if (result.inflection.isNotBlank()) append("\u8bcd\u5f62\uff1a").append(result.inflection).append("\n")
+            if (result.phonetic.isNotBlank()) append("\u97f3\u6807\uff1a").append(result.phonetic).append("\n\n")
+            append("\u4e2d\u6587\u91ca\u4e49\uff1a\n").append(result.meaning)
             if (result.definition.isNotBlank() && result.definition != result.meaning) {
-                append("\n\n").append(result.definition)
+                append("\n\n\u82f1\u6587\u91ca\u4e49\uff08\u524d 3 \u6761\uff09\uff1a\n").append(result.definition)
             }
         }
         val dialog = AlertDialog.Builder(this)
@@ -2164,11 +2238,21 @@ class LearningActivity : Activity() {
     }
 
     private fun generateCaptions() {
-        if (subtitles.isNotEmpty() && subtitles.any { it.chineseText.isNullOrBlank() }) {
-            translateCurrentSubtitlesWithRemoteFallback()
+        if (currentVideoUri == null) {
+            statusText.text = "请先导入或加载视频。"
             return
         }
-        startCaptionGenerationService()
+        if (subtitles.isEmpty()) {
+            startCaptionGenerationService()
+            return
+        }
+        AlertDialog.Builder(this)
+            .setTitle("更新双语字幕")
+            .setMessage("重新生成会调用电脑端 Whisper 重新识别全部英文，并同步重新翻译全部中文。旧字幕会保留到新结果完整生成后再替换。")
+            .setPositiveButton("重新识别并翻译") { _, _ -> startCaptionGenerationService() }
+            .setNeutralButton("仅重翻中文") { _, _ -> showTranslationSourceDialog() }
+            .setNegativeButton("取消", null)
+            .show()
     }
 
     private fun translateIfNeededForDisplay() {
@@ -2220,20 +2304,21 @@ class LearningActivity : Activity() {
             .show()
     }
 
-    private fun startCaptionGenerationService() {
+    private fun startCaptionGenerationService(forceTranscribe: Boolean = subtitles.isNotEmpty()) {
         val uri = currentVideoUri
         if (uri == null) {
             statusText.text = "请先导入或加载视频。"
             return
         }
         requestNotificationPermissionIfNeeded()
-        statusText.text = "已开始后台生成字幕。可以切到其他软件，完成后会自动加载字幕。"
+        Toast.makeText(this, "已加入后台字幕任务，可在“生成字幕中”查看进度。", Toast.LENGTH_SHORT).show()
         val intent = Intent(this, CaptionGenerationService::class.java)
             .putExtra(CaptionGenerationService.EXTRA_VIDEO_URI, uri.toString())
             .putExtra(CaptionGenerationService.EXTRA_VIDEO_TITLE, displayName(uri))
             .putExtra(CaptionGenerationService.EXTRA_SERVICE_URL, currentServiceUrl())
             .putExtra(CaptionGenerationService.EXTRA_SERVICE_URLS, JSONArray(serviceUrlCandidates()).toString())
             .putExtra(CaptionGenerationService.EXTRA_TASK_KIND, CaptionGenerationService.TASK_GENERATE)
+            .putExtra(CaptionGenerationService.EXTRA_FORCE_TRANSCRIBE, forceTranscribe)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             startForegroundService(intent)
         } else {
@@ -2254,7 +2339,7 @@ class LearningActivity : Activity() {
         requestNotificationPermissionIfNeeded()
         translationInProgress = true
         val label = if (taskKind == CaptionGenerationService.TASK_TRANSLATE_REMOTE) "电脑端" else "手机端"
-        statusText.text = "已开始后台${label}翻译。完成后会自动更新本地字幕。"
+        Toast.makeText(this, "已加入后台${label}翻译，可在“生成字幕中”查看进度。", Toast.LENGTH_SHORT).show()
         val intent = Intent(this, CaptionGenerationService::class.java)
             .putExtra(CaptionGenerationService.EXTRA_VIDEO_URI, uri.toString())
             .putExtra(CaptionGenerationService.EXTRA_VIDEO_TITLE, displayName(uri))
@@ -2404,14 +2489,14 @@ class LearningActivity : Activity() {
                     statusText.text = "音频已准备：${formatMs(audio.durationMs)}，${formatBytes(audio.file.length())}，正在上传到 Whisper 服务..."
                 }
                 try {
-                    val jobId = createTranscriptJobWithRetry(serviceUrl, audio)
+                    val jobId = createTranscriptJobWithRetry(serviceUrl, audio, displayName(uri))
                     pollTranscriptJob(serviceUrl, jobId)
                 } catch (error: Exception) {
                     if (error.message.orEmpty().contains("HTTP 404")) {
                         runOnUiThread {
                             statusText.text = "服务端不支持进度任务接口，改用同步生成字幕..."
                         }
-                        requestTranscriptSync(serviceUrl, audio)
+                        requestTranscriptSync(serviceUrl, audio, displayName(uri))
                     } else {
                         throw error
                     }
@@ -2462,9 +2547,9 @@ class LearningActivity : Activity() {
         }
     }
 
-    private fun createTranscriptJobWithRetry(serviceUrl: String, audio: RemoteAudioFile): String {
+    private fun createTranscriptJobWithRetry(serviceUrl: String, audio: RemoteAudioFile, videoTitle: String): String {
         return try {
-            createTranscriptJob(serviceUrl, audio)
+            createTranscriptJob(serviceUrl, audio, videoTitle)
         } catch (first: Exception) {
             val message = first.message.orEmpty()
             if (!message.contains("unexpected end", ignoreCase = true) &&
@@ -2475,7 +2560,7 @@ class LearningActivity : Activity() {
             }
             Thread.sleep(1_500)
             ensureWhisperServiceReachable(serviceUrl)
-            createTranscriptJob(serviceUrl, audio)
+            createTranscriptJob(serviceUrl, audio, videoTitle)
         }
     }
 
@@ -2498,7 +2583,7 @@ class LearningActivity : Activity() {
         }
     }
 
-    private fun createTranscriptJob(serviceUrl: String, audio: RemoteAudioFile): String {
+    private fun createTranscriptJob(serviceUrl: String, audio: RemoteAudioFile, videoTitle: String): String {
         val audioFile = audio.file
         val url = URL(jobCreateUrl(serviceUrl))
         val totalBytes = audioFile.length().coerceAtLeast(1L)
@@ -2508,6 +2593,7 @@ class LearningActivity : Activity() {
             readTimeout = 60_000
             doOutput = true
             setRequestProperty("Content-Type", audio.mimeType)
+            setRequestProperty("X-Video-Title", URLEncoder.encode(videoTitle, Charsets.UTF_8.name()))
             setRequestProperty("Connection", "close")
             setFixedLengthStreamingMode(totalBytes)
         }
@@ -2533,7 +2619,7 @@ class LearningActivity : Activity() {
         }
     }
 
-    private fun requestTranscriptSync(serviceUrl: String, audio: RemoteAudioFile): String {
+    private fun requestTranscriptSync(serviceUrl: String, audio: RemoteAudioFile, videoTitle: String): String {
         val audioFile = audio.file
         val url = URL(serviceUrl)
         val totalBytes = audioFile.length().coerceAtLeast(1L)
@@ -2543,6 +2629,7 @@ class LearningActivity : Activity() {
             readTimeout = 30 * 60 * 1000
             doOutput = true
             setRequestProperty("Content-Type", audio.mimeType)
+            setRequestProperty("X-Video-Title", URLEncoder.encode(videoTitle, Charsets.UTF_8.name()))
             setRequestProperty("Connection", "close")
             setFixedLengthStreamingMode(totalBytes)
         }
@@ -2767,8 +2854,8 @@ class LearningActivity : Activity() {
         val ordered = linkedSetOf<String>()
         val defaultUrl = if (isRunningOnEmulator()) emulatorServiceUrl else phoneUsbServiceUrl
         val current = currentServiceUrl()
-        ordered += defaultUrl
         if (current.isNotBlank()) ordered += current
+        ordered += defaultUrl
         val saved = getSharedPreferences(prefsName, MODE_PRIVATE)
             .getString(serviceUrlCandidatesKey, null)
             .orEmpty()
@@ -2788,7 +2875,7 @@ class LearningActivity : Activity() {
     private fun serviceUrlPriority(url: String): Int {
         val lower = url.lowercase()
         return when {
-            isRunningOnEmulator() && lower.contains("10.0.2.2") -> 0
+            isRunningOnEmulator() && (lower.contains("10.0.2.2") || lower.contains("127.0.0.1")) -> 0
             !isRunningOnEmulator() && lower.contains("127.0.0.1") -> 0
             lower.startsWith("http://192.168.") || lower.startsWith("http://10.") || lower.startsWith("http://172.") -> 1
             lower.startsWith("http://") -> 2
@@ -3281,7 +3368,7 @@ class LearningActivity : Activity() {
 
     private fun parseTranscriptJson(json: String): List<SubtitleLine> {
         val array = JSONArray(json)
-        return mergeShortSubtitleFragments((0 until array.length()).mapNotNull { index ->
+        return (0 until array.length()).mapNotNull { index ->
             val body = array.optJSONObject(index) ?: return@mapNotNull null
             val start = body.optDouble("start", Double.NaN).takeIf { !it.isNaN() } ?: return@mapNotNull null
             val end = body.optDouble("end", Double.NaN).takeIf { !it.isNaN() } ?: return@mapNotNull null
@@ -3295,7 +3382,7 @@ class LearningActivity : Activity() {
                 chineseText = translation,
                 translationSource = if (translation.isNullOrBlank()) null else TranslationSource.COMPUTER.id
             )
-        })
+        }
     }
 
     private fun numberField(body: String, name: String): Double? {
@@ -3351,7 +3438,7 @@ class LearningActivity : Activity() {
                 )
             }
             if (loaded.isEmpty()) return null
-            val normalized = mergeShortSubtitleFragments(loaded)
+            val normalized = loaded.mapIndexed { index, line -> line.copy(index = index + 1) }
             subtitles.clear()
             subtitles.addAll(normalized)
             selectedIndex = selectedIndex.takeIf { it in subtitles.indices }
@@ -3457,11 +3544,11 @@ class LearningActivity : Activity() {
     private fun playbackEndMs(index: Int, line: SubtitleLine): Int {
         val start = startMs(line)
         val displayedEnd = endMs(line)
-        val trimmedEnd = displayedEnd - sentenceEndTrimMs
+        val naturalEnd = displayedEnd + sentenceTailGraceMs
         val nextStartCap = subtitles.getOrNull(index + 1)?.let { startMs(it) - nextSentenceGuardMs }
-        val cappedEnd = listOfNotNull(trimmedEnd, nextStartCap).minOrNull() ?: trimmedEnd
-        val minimumEnd = (start + 300).coerceAtMost(displayedEnd)
-        return cappedEnd.coerceIn(minimumEnd, displayedEnd)
+        val hardCap = nextStartCap?.coerceAtLeast(start + 1) ?: naturalEnd
+        val cappedEnd = minOf(naturalEnd, hardCap)
+        return cappedEnd.coerceAtLeast(start + 1)
     }
 
     private fun formatMs(ms: Int): String {

@@ -1,854 +1,479 @@
 # 看视频学英语
 
-一个 Android 英语视频学习 App：导入本地视频后，可以自动生成英文字幕和中文字幕，按句复读，点击单词查中文释义和发音，并把字幕、播放进度和单词本保存在本机。
+“看视频学英语”是一个 Android 英语视频学习 App。它的核心目标很简单：让你用自己真正感兴趣的英文视频逐句学英语。
 
-这个仓库是远程 Whisper 版本。手机负责播放视频、抽取音频和学习交互；电脑负责运行 Whisper 字幕服务。这样即使手机性能一般，也可以得到比较稳定的字幕识别效果。
+很多英文视频没有现成字幕，或者只有英文字幕、没有中文字幕。这个软件可以把手机里的本地视频交给电脑端 Whisper 服务处理，自动生成英文字幕，再翻译成中文，并把字幕保存到手机本地。以后再打开同一个视频，可以直接继续学习，不需要重复生成。
 
-## 功能概览
+学习时可以只看英文字幕，也可以打开中英双语字幕。视频会按句子切分，你可以上一句、下一句、单句复读、循环播放。遇到不认识的单词，直接点击当前英文句子里的单词，就能查看中文释义、音标、英文解释和例句，也能听单词发音。查过的单词会按日期收录进单词本，单词本里的例句就是视频里的原句，点击例句可以回到视频里看真实语境。
 
-- 导入手机里的本地视频文件。
-- 导入已有 SRT 字幕。
-- 从视频中抽取 16 kHz mono WAV 音频并上传到电脑 Whisper 服务。
-- 电脑端使用 `faster-whisper` 生成英文字幕，并可通过电脑端翻译接口补全中文翻译。
-- v2.0.0 新增底部四个页面：`学习`、`生成字幕中`、`已完成`、`我的`，并加入图标化底部导航、空状态插画和任务视频第一帧预览。
-- `生成字幕中` 页面支持一次选择多个视频，后台排队生成英文字幕并自动调用电脑端翻译成中文；任务支持暂停、继续、重试，网络或服务中断时会自动续跑数次。
-- `已完成` 页面集中管理已经生成好中英双语字幕的视频，可开始学习、导出、重翻或删除记录。
-- `我的` 页面包含作者信息、作者图、单词本入口、详细使用说明、电脑端服务说明、GitHub 链接和版本信息。
-- 支持 USB 调试、本地局域网或 Cloudflare Tunnel 远程连接电脑服务。
-- 字幕按视频 URI 缓存在 App 私有目录，再次打开同一视频会自动加载。
-- 支持英文、中文、双语三种字幕显示模式。
-- 支持整段播放、单句复读、上一句、下一句。
-- 支持字幕整体提前/延后 0.5 秒微调。
-- 点击当前英文句子中的单词可查中文释义、音标、英文释义和例句。
-- 支持系统 TextToSpeech 发音。
-- 支持单词本，保存查过的单词及对应视频句子。
-- 保留手机端 `whisper.cpp` native 管线，默认关闭，可按需启用。
+从 v2.0.2 开始，手机只负责可断点续传的音频上传和进度查询；电脑接收完整音频后会独立跑完识别与翻译。即使手机锁屏、App 被系统重建或网络暂时断开，电脑任务也不会中止，手机恢复连接后会继续显示同一个任务的进度并取回结果。
 
-## 安装包
+## 适合谁使用
 
-仓库的 `release/` 目录用于放可直接安装的 APK：
+- 想用 YouTube、课程、纪录片、访谈、旅行视频等真实材料学英语的人。
+- 想逐句听懂视频，而不是只泛泛看一遍的人。
+- 想积累视频里的真实表达，并把生词放进单词本复习的人。
+- 手机性能一般，但电脑可以承担字幕识别和翻译任务的人。
+- 希望字幕和翻译生成后离线保存，之后随时学习的人。
 
-```text
-release/app-v1.0.0.apk
-release/app-v2.0.0.apk
-release/SHA256SUMS.txt
-```
+## 主要功能
 
-版本说明：
+### 逐句学习视频
 
-| 安装包 | 版本 | 适合场景 | 主要功能 |
+导入本地英文视频后，App 会按字幕句子进行学习。你可以控制当前句的播放、复读、循环、上一句和下一句，也可以把视频时间提前或延后 0.5 秒，用来修正个别视频里字幕和声音的轻微偏差。
+
+### 自动生成英文字幕和中文翻译
+
+如果视频没有字幕，可以点击“生成+”或在“生成字幕中”页面批量添加视频。已有字幕时，“生成+”会提供“重新识别并翻译”和“仅重翻中文”两个明确选项。重新识别一定会同时重新生成中文翻译；只有新英文和全部中文都成功返回后，App 才会原子替换旧字幕缓存。
+
+### 中英字幕自由切换
+
+学习时可以在英文、中文和中英双语之间切换。想训练听力时可以关闭中文，只看英文；想确认含义时再打开中文或双语。
+
+### 单词查询和单词本
+
+点击当前英文句子里的单词，可以查看中文解释、音标、英文解释和例句，并播放单词发音。查过的单词会自动按日期保存到单词本。单词本里的例句来自原视频字幕，点击例句可以回到视频对应位置，复习时能看到真实语境。
+
+### 后台批量处理
+
+“生成字幕中”页面支持一次选择多个视频。App 会先按添加顺序把这一批视频的音频全部分块上传到电脑，再依次提交电脑端 FIFO 队列；电脑只运行一个识别/翻译任务，完成后自动处理下一条。已经提交的整批任务不依赖手机保持在线，手机恢复网络时会继续查询并下载双语结果。
+
+### 导入和导出字幕
+
+可以导入已有的 SRT 字幕，也可以导出已经生成好的字幕。导出时可以选择只导出英文字幕，或导出中英双语字幕。
+
+## 版本说明
+
+### v2.0.3
+
+v2.0.3 是当前推荐版本，重点修复真实手机 USB 拔插后的自动恢复，并优化逐句学习体验。
+
+- 电脑启动脚本会持续核对每台已连接 Android 设备的 `adb reverse`；同一部手机拔掉再插回后会自动重建 8765 端口映射。
+- USB、局域网、公网仍按优先级自动探测；等待连接时会清除过期的连接标签，最长 10 秒再次探测，不再长期显示失效的 USB 图标。
+- 学习页不再显示字幕生成进度和服务连接状态；这些信息只在“生成字幕中”页及后台通知展示，避免打断学习。
+- 逐句播放默认使用“单次”；句尾增加短暂保护时间，并在下一句开始前停止，兼顾最后一个词完整与不串入下一句。
+- 修正 `calling` 等 `-ing` 形式的原形判断，`calling` 会回到 `call` 并优先显示 `call` 的中文释义。
+
+安装包位置：`release/app-v2.0.3.apk`
+
+### v2.0.2
+
+v2.0.2 重点解决长视频上传中断、手机短暂离线导致任务失败，以及重复生成浪费上传时间的问题。
+
+- 音频改为 1 MiB 分块上传，网络中断后从电脑已确认的字节偏移继续，不再重传完整文件。
+- 电脑端任务、进度和结果全部持久化；服务重启后仍可继续查询已提交的任务。
+- 手机保存电脑任务 ID，锁屏、进程重建或网络切换后继续跟踪同一个任务。
+- 电脑永久保留按 SHA-256 命名的音频、英文字幕和双语字幕；同一音频再次处理时可跳过上传。
+- “仅重翻中文”直接复用保存的英文字幕；普通重复生成可直接复用双语结果；“重新识别并翻译”会复用音频但强制重新运行识别和翻译。
+- 连接会按 `USB/模拟器 -> 局域网 -> 公网 Cloudflare` 自动探测和切换；拔掉 USB 后不需要手动修改地址。
+- 批量任务先把全部音频上传到电脑，再按添加顺序提交；电脑端使用单工作线程 FIFO 队列逐个完成识别和翻译。
+- 任务卡显示上传进度、电脑端阶段/队列位置、任务 ID、最后同步时间和当前连接方式。
+- 任务封面从视频开头的多个时间点选取第一张可见画面，避开纯黑片头；已有黑色缓存会自动重新生成。
+
+安装包位置：`release/app-v2.0.2.apk`
+
+### v2.0.1
+
+v2.0.1 重点提升字幕准确率、重新生成体验和锁屏后台可靠性。
+
+- 英文识别默认改为本地 `faster-whisper-large-v3`，CUDA 自动使用 `int8_float16`。
+- 改进基于单词时间戳、静音、标点和长度约束的分句，减少句子中间误断。
+- 学习页新增“生成+”；已有字幕时可以选择“重新识别并翻译”或“仅重翻中文”。
+- “已完成”页面新增“重生成”，不必先删除旧字幕。
+- 重新识别时英文和中文必须成套成功，任何一句缺少翻译都不会覆盖旧缓存。
+- 字幕缓存采用同目录原子替换，失败时保留可继续学习的旧字幕。
+- 后台任务使用可重投递前台服务、持续通知、部分唤醒锁和 Wi-Fi 锁；锁屏、切换应用或 Activity 重建后会继续处理。
+- 查词结果显示原形、词形、音标和中文释义，时态或复数形式会回到原形解释。
+
+安装包位置：`release/app-v2.0.1.apk`
+
+### v2.0.0
+
+v2.0.0 引入了后台任务和电脑端服务页面。
+
+- 新增底部四个页面：学习、生成字幕中、已完成、我的。
+- “生成字幕中”支持批量选择多个视频，并显示每个任务的阶段、进度、连接方式和视频首帧。
+- 生成字幕后会继续调用电脑端翻译，自动生成中英双语字幕。
+- 任务失败后会保留音频缓存和进度，支持继续、暂停、重试和取消。
+- “已完成”页面集中管理已生成字幕的视频，可以打开学习、导出字幕、重新处理或删除记录。
+- “我的”页面加入作者信息、单词本入口、使用说明、电脑端服务说明、GitHub 链接和版本信息。
+- 电脑端服务默认使用更高质量的英文识别和中文翻译模型，并显示运行状态、GPU 信息、模型信息和处理进度。
+
+安装包位置：`release/app-v2.0.0.apk`
+
+### v1.0.0
+
+v1.0.0 是早期版本，功能集中在单个学习页面里。
+
+- 可以导入本地视频和 SRT 字幕。
+- 可以生成英文字幕和中文翻译。
+- 可以逐句播放、复读、循环和查词。
+- 可以保存学习进度和单词本。
+
+安装包位置：`release/app-v1.0.0.apk`
+
+## APK 与电脑端服务兼容性
+
+仓库同时保留旧版和 v2.0.2/v2.0.3 两套电脑端文件，不会删除 GitHub 上现有的旧源码与旧服务。不同版本的手机端协议不同，请按下表成套使用，不要交叉混用。
+
+| 手机 APK | 电脑端启动入口 | 实际服务源码 | 说明 |
 | --- | --- | --- | --- |
-| `release/app-v1.0.0.apk` | 1.0.0 | 想继续使用上一版稳定学习界面 | 单个学习界面内完成导入视频、生成字幕、翻译、复读、查词、导出字幕等操作。 |
-| `release/app-v2.0.0.apk` | 2.0.0 | 推荐安装的新版本 | 新增底部四页：学习、生成字幕中、已完成、我的；加入图标化导航、作者图、任务视频第一帧预览和空状态插画；支持批量选择多个视频后台排队生成英文字幕和中文翻译；任务可暂停、继续、重试并自动续跑；已完成视频可集中管理、开始学习、导出、重翻或删除。 |
+| `release/app-v1.0.0.apk`、`release/app-v2.0.0.apk` | `tools/start_video_english_service.ps1` | `tools/local_whisper_service.py` | GitHub 原有旧版组合，文件继续保留 |
+| `release/app-v2.0.1.apk` | `tools/start_video_english_service.ps1` | `tools/local_whisper_service.py` | 仍使用旧协议；如需完全复现当时行为，建议使用 v2.0.1 发布时的提交 |
+| `release/app-v2.0.2.apk` | `tools/start_video_english_service_v2.0.2.ps1` | `tools/local_whisper_service_v2.0.2.py` | 支持断点上传、电脑持久化任务、音频/字幕缓存复用和离线进度恢复 |
+| `release/app-v2.0.3.apk` | `tools/start_video_english_service_v2.0.2.ps1` | `tools/local_whisper_service_v2.0.2.py` | 当前推荐组合；协议沿用 v2.0.2，并修复 USB 重插、过期连接标签和逐句学习体验 |
 
-安装方式：
+从旧协议版本升级到 v2.0.2/v2.0.3 时，请先等待旧电脑端任务结束并按 `Ctrl + C` 关闭旧服务，再安装对应 APK，最后运行 v2.0.2 启动脚本。v2.0.2 升级到 v2.0.3 不需要迁移缓存，仍使用同一个版本化启动命令。旧 APK、旧启动脚本和旧服务源码都可以继续保留，但两套服务不能同时占用默认的 8765 端口。
 
-1. 推荐在 Android 手机上打开 `release/app-v2.0.0.apk`。
-2. 按系统提示允许安装来自当前来源的应用。
-3. 安装完成后打开“看视频学英语”。
+升级不会主动删除手机里已有的视频、字幕、学习进度或单词本。v2.0.2 新增的电脑端缓存从 `service_data` 开始建立；旧服务临时目录中的音频不会自动迁移。
 
-如果使用 adb 安装：
+## 推荐使用流程
 
-```powershell
-adb install -r release/app-v2.0.0.apk
-```
+### 第一步：在电脑端启动服务
 
-当前 APK 包名是：
-
-```text
-com.codex.videolearnenglish.remote
-```
-
-它可以和原版包名不同的旧版本并存安装。
-
-## 快速使用
-
-### 1. 准备视频
-
-把要学习的英文视频放到手机里，例如 `Download` 目录。App 只读取你选择的视频，不会扫描整台手机。
-
-### 2. 打开视频
-
-1. 打开 App。
-2. 点“导入”。
-3. 选择本地视频文件。
-4. 视频加载成功后，可以先点“播放”确认画面和声音正常。
-
-### 3. 使用已有字幕
-
-如果你已经有 SRT 字幕：
-
-1. 点“字幕”。
-2. 选择 `.srt` 文件。
-3. 字幕会出现在右侧或下方列表中。
-4. 点任意一句，App 会跳转到该句并开始单句复读。
-
-SRT 支持两种常见格式：
-
-```text
-1
-00:00:01,000 --> 00:00:03,000
-This is the English subtitle.
-这是中文字幕。
-```
-
-如果只有英文行，也可以正常使用。后续可点“生成”补中文翻译。
-
-### 4. 自动生成字幕
-
-没有字幕时，点“生成”。App 会：
-
-1. 从当前视频抽取音频。
-2. 把 WAV 音频上传到电脑 Whisper 服务。
-3. 显示上传和识别进度。
-4. 下载识别结果。
-5. 如果电脑端翻译可用，会继续补全中文字幕。
-6. 保存到本机字幕缓存。
-
-第一次使用前需要先启动电脑端服务，见下方“电脑端 Whisper 服务”。
-
-### 5. 学习操作
-
-常用按钮说明：
-
-| 按钮 | 作用 |
-| --- | --- |
-| 播放/暂停 | 正常播放或暂停视频 |
-| 导入 | 选择本地视频 |
-| 上句/下句 | 切换当前复读句子 |
-| 翻译关/翻译开 | 当前句子是否显示中文翻译 |
-| 英文/双语/中文 | 切换字幕列表显示模式 |
-| 长按英文/双语/中文 | 查看当前中文翻译来源，并选择用电脑端或手机端重新翻译 |
-| Loop On/Loop Off | 开关单句循环 |
-| 复读 | 从当前句开头重新播放 |
-| 生成 | 自动生成字幕 |
-| 字幕 | 导入 SRT 字幕 |
-| 早0.5秒 | 字幕整体提前 0.5 秒 |
-| 晚0.5秒 | 字幕整体延后 0.5 秒 |
-| 导出 | 导出当前字幕，可选择英文字幕或英中双字幕 |
-| 单词本 | 查看已保存的查词记录 |
-
-### 6. 查词和发音
-
-字幕生成或导入后：
-
-1. 点字幕列表中的一句。
-2. 上方当前句会显示英文。
-3. 点英文句子里的单词。
-4. 弹窗显示中文释义、音标、英文释义和例句。
-5. 点“发音”播放该单词读音。
-6. 查过的单词会进入单词本。
-
-### 7. 导出字幕
-
-字幕生成或导入后，可以点“导出”保存 SRT 文件：
-
-1. 点第三行按钮里的“导出”。
-2. 选择“只导出英文字幕”或“导出英中双字幕”。
-3. 在系统文件保存窗口里选择保存位置和文件名。
-4. 导出的文件可以用于播放器、剪辑软件或继续分享给其他设备。
-
-## 电脑端 Whisper 服务
-
-手机自动生成字幕时，需要电脑运行一个 Whisper HTTP 服务。手机负责从视频里抽取音频并上传，电脑负责识别字幕并把结果返回给手机。
-
-同一个电脑端服务也负责更高质量的英译中翻译。App 里点“生成”后，如果已有英文字幕但没有中文翻译，或者切换到“双语/中文”时发现翻译为空，App 会优先请求电脑端 `/translate` 接口；电脑端不可用时会保留英文字幕并提示中文翻译失败，修好服务后可长按“英文/双语/中文”重新翻译。
-
-最重要的一点：手机端“长按生成”可以打开服务地址设置页。每次换网络环境时，先长按“生成”，把服务地址改成对应环境的地址，点“测试”成功后，再返回点“生成”。
-
-如果已经有英文字幕但中文翻译不准，可以长按“英文/双语/中文”按钮。弹窗会显示当前中文字幕来自电脑端、手机端、导入字幕还是旧缓存，并提供两个重新翻译入口：
-
-- 电脑端重翻：优先推荐。手机把已有英文字幕按每批 16 句发送给电脑端 `/translate`，电脑用 `transformers` 模型翻译，手机端会显示类似“电脑端翻译中：16/153”的进度，完成后自动写回本地字幕缓存。
-- 手机端重翻：备用方案。手机使用 ML Kit 英译中模型翻译，首次使用需要联网下载模型，准确性通常弱于电脑端。
-
-重新翻译会覆盖当前中文字幕，但会保留英文字幕和时间轴。翻译任务和生成字幕一样在前台服务中运行，切到后台或锁屏后仍会继续，前提是系统没有强行限制 App 后台网络。
-
-### 环境要求
-
-- Windows 10/11、macOS 或 Linux。
-- Python 3.10+。
-- FFmpeg，建议加入 `PATH`。
-- 足够的磁盘空间存放 Whisper 模型。
-- CPU 可作为兼容回退；推荐 NVIDIA GPU。当前验证可用组合为：`faster-whisper 1.1.0`、`ctranslate2 4.5.0`、CUDA 12.4 runtime/cuBLAS、cuDNN 9、带 CUDA 的 PyTorch。
-
-安装 Python 依赖：
-
-```powershell
-python -m pip install -r requirements.txt
-```
-
-如果想使用电脑端翻译，也需要安装 `requirements.txt` 里的翻译依赖：`argostranslate`、`transformers`、`sentencepiece`、`torch`。依赖已写在同一个文件里。注意 `requirements.txt` 不能替不同显卡驱动选择正确的 PyTorch CUDA wheel；如果 `torch.version.cuda` 显示 `None`，请按 [PyTorch 官方安装选择器](https://pytorch.org/get-started/locally/) 重新安装与本机驱动匹配的 CUDA 版本。
-
-如果还没有 FFmpeg，Windows 可以用 winget 安装：
-
-```powershell
-winget install --id Gyan.FFmpeg
-```
-
-### 模型目录
-
-推荐把 faster-whisper 模型放在仓库的 `models/` 目录。该目录默认被 Git 忽略，因为模型通常很大，不适合直接提交到仓库。
-
-推荐目录名：
-
-```text
-models/faster-whisper-small/
-models/faster-whisper-medium/
-models/faster-distil-whisper-large-v3/
-models/faster-whisper-medium（Multilingual model）/
-models/nllb-200-distilled-600M/
-```
-
-Whisper 模型目录里应包含 `model.bin` 等文件；NLLB 目录里应包含 `config.json`、`tokenizer.json`、`sentencepiece.bpe.model` 和模型权重。服务会按以下逻辑选择模型：
-
-| 场景 | 优先模型 |
-| --- | --- |
-| 语言检测 | `models/faster-whisper-small`，然后 multilingual medium |
-| 英文字幕 | `models/faster-distil-whisper-large-v3`，然后 `models/faster-whisper-medium`，最后 `models/faster-whisper-small` |
-| 其他语言 | multilingual medium |
-| 英译中 | `models/nllb-200-distilled-600M`；目录不存在时使用 `facebook/nllb-200-distilled-600M` 并尝试下载 |
-
-如果本地模型目录不存在，`faster-whisper` 会尝试按模型名加载，例如 `small.en`。这可能触发联网下载。
-
-一键脚本默认会把英文识别模型设置为 `distil-large-v3`，也就是本地目录 `models/faster-distil-whisper-large-v3/`。同时脚本会启用一组字幕热词和提示词，帮助 Whisper 更准确识别旅行、路线、户外装备类视频里的固定表达，例如 `as the crow flies`、`long way around Africa`、`coast to coast`、`Google Maps`。如果你想临时改回更快但准确率较低的 medium 或 small，可以在启动前设置：
-
-手机端如果看到 `Loading language detector only: faster-whisper-small`，这只表示电脑端正在用小模型快速判断视频语言，并不是正式生成字幕的模型。检测到英文后，进度会继续显示 `Loading subtitle model: faster-distil-whisper-large-v3`，后续英文字幕会由 `distil-large-v3` 生成。
-
-```powershell
-$env:WHISPER_ENGLISH_MODEL="medium"
-powershell -ExecutionPolicy Bypass -File tools/start_video_english_service.ps1
-```
-
-如果某个视频有很多专有名词，也可以启动前自定义热词：
-
-```powershell
-$env:WHISPER_HOTWORDS="Prudhoe Bay, Lillooet, Garmin inReach Mini, as the crow flies"
-powershell -ExecutionPolicy Bypass -File tools/start_video_english_service.ps1
-```
-
-## 自动生成字幕：完整步骤
-
-### 第一步：电脑端启动服务
-
-先进入项目目录：
+进入项目目录，然后运行一行命令：
 
 ```powershell
 cd C:\tmp\video-english-learning-remote
+powershell -ExecutionPolicy Bypass -File tools/start_video_english_service_v2.0.2.ps1
 ```
 
-推荐只运行这一行：
+这个脚本会同时启动字幕识别、中文翻译和连接服务。正常启动后，PowerShell 窗口会显示三类地址：
 
-```powershell
-powershell -ExecutionPolicy Bypass -File tools/start_video_english_service.ps1
-```
+- USB/模拟器地址：手机用 USB 连接电脑时优先使用。
+- 局域网地址：手机和电脑在同一个 Wi-Fi 下使用。
+- 公网备用地址：手机使用流量，或者不在同一个局域网时使用。
 
-这个一键脚本会自动做这些事：
-
-- 启动电脑端 Whisper 字幕服务。
-- 默认启用电脑端英译中翻译：`transformers` + `NLLB-200 distilled 600M`，语言方向为 `eng_Latn -> zho_Hans`。
-- Whisper 和 NLLB 默认都使用 `auto` 设备选择：各自的 CUDA 运行时可用时使用 GPU，否则打印原因并回退 CPU。
-- 默认使用 `faster-distil-whisper-large-v3` 做英文字幕识别，并启用字幕热词提升常见短语识别准确率。
-- 默认启用字幕优化翻译，会先修正少量高置信 Whisper 误识别短语，再把机器翻译结果润色成更自然的中文字幕。
-- 自动给已连接的 Android 真机配置 `adb reverse`，USB 连接时优先走 USB。
-- 打印局域网地址，手机和电脑在同一 Wi-Fi 时可自动切到局域网。
-- 如果电脑已安装 `cloudflared`，会自动创建 Cloudflare Tunnel，手机用流量或不在同一局域网时也可以继续连接。
-- 生成一个一次性 token，并把 USB、局域网、公网候选地址写入本机运行时配置。App 能从电脑端读取这些候选地址，按 USB -> 局域网 -> 公网的顺序自动选择可用连接。
-
-PowerShell 窗口必须保持打开。关闭窗口后，电脑端字幕和翻译服务都会停止；Cloudflare 临时公网地址也会失效。
-
-电脑端服务运行时，PowerShell 窗口会持续打印运行日志：
-
-- 当前加载的 Whisper 字幕识别模型和设备，例如 `faster-distil-whisper-large-v3 on cuda/float16`。
-- 语言检测、正式识别、后处理、翻译等阶段进度。
-- 每个后台 job 的 `job id`、百分比、错误信息和完成字幕条数。
-- `/translate` 的批次数量和当前翻译批次，例如 `Translation batch 17-32/153`。
-
-### 第二步：手机端生成字幕
-
-1. 打开 App，先点“导入”选择视频。
-2. 电脑端一键脚本保持运行。
-3. 点“生成”。App 会自动尝试 USB、局域网和公网候选地址，连上后抽取音频、上传到电脑、等待 Whisper 识别并保存字幕。
-
-通常不需要再长按“生成”手动填写地址。只有换了电脑、清除了 App 数据，或公网 Cloudflare 地址变了但手机还没通过 USB/局域网同步到新配置时，才需要长按“生成”手动填写电脑端窗口打印的完整地址。
-
-生成和翻译过程中可以切到后台或锁屏。App 会用前台服务、CPU 唤醒锁和 Wi-Fi 锁继续上传、轮询任务结果、翻译并保存字幕；通知栏会显示当前进度。不要在系统后台清理里强行结束 App，也不要关闭电脑端 PowerShell 服务窗口。如果手机系统限制后台网络，建议在系统电池设置里允许“看视频学英语”后台运行，并允许通知权限。
-
-如果一开始手机走的是 Cloudflare 公网，后来进入同一局域网或插上 USB，App 会在后续轮询和分批翻译时重新检测候选地址，并自动优先切到 USB 或局域网；公网只作为最后兜底。正在上传的单次连接不能无损搬迁，但上传连接一旦中断，重试会重新选择当前最稳定的 USB/局域网/公网地址。
-
-在 `生成字幕中` 页面可以管理后台任务：
-
-- `暂停`：暂停排队、上传、轮询或分批翻译中的任务；已提取的音频缓存和已生成的本地字幕会保留。
-- `继续`：把暂停或失败的任务重新放回队列，从缓存音频或缓存字幕继续处理。
-- `重试`：清空该任务的失败次数并重新开始这一轮处理。
-- 自动续跑：网络断开、电脑端服务临时中断、Cloudflare 地址不稳定等错误会自动续跑数次；连续失败太多次后才会停在失败状态，等待用户手动检查服务后再继续或重试。
-
-每个任务卡左侧会显示视频第一帧缩略图，方便区分多个视频。
-
-### 第三步：电脑端翻译
-
-电脑端翻译不需要在手机里填写第二个地址。App 会根据选中的 `/transcribe` 地址自动推导 `/translate` 地址，例如：
+这些地址也会保存到：
 
 ```text
-http://127.0.0.1:8765/transcribe              -> http://127.0.0.1:8765/translate
-http://192.168.0.133:8765/transcribe          -> http://192.168.0.133:8765/translate
-https://xxxxx.trycloudflare.com/transcribe?token=abc
-                                               -> https://xxxxx.trycloudflare.com/translate?token=abc
+tools/latest_service_urls.txt
 ```
 
-一键脚本默认已经使用下面的翻译设置：
+如果手机端不知道该填哪个地址，优先看这个文件。
 
-```powershell
-$env:TRANSLATION_PROVIDER="transformers"
-$env:TRANSLATION_MODEL="models/nllb-200-distilled-600M"
-$env:TRANSLATION_DEVICE="auto"
-$env:TRANSLATION_SOURCE_LANGUAGE="eng_Latn"
-$env:TRANSLATION_TARGET_LANGUAGE="zho_Hans"
-$env:TRANSLATION_STYLE="subtitle"
-```
+### 第二步：手机端导入视频
 
-`TRANSLATION_STYLE=subtitle` 是默认值，用于字幕场景优化。它不会改变接口格式，只是在电脑端翻译前后做轻量修正：例如把 `as the crow flies` 处理成“按直线距离”，把 Whisper 误识别的 `lost way around Africa` 修正为更合理的 `long way around Africa`，再翻译成“绕行非洲的漫长路线”。如果你想看模型未经优化的原始翻译，可以启动前设置：
+打开 App 后，可以在“学习”页导入当前要学习的视频，也可以在“生成字幕中”页批量添加以后想学习的视频。
 
-```powershell
-$env:TRANSLATION_STYLE="raw"
-powershell -ExecutionPolicy Bypass -File tools/start_video_english_service.ps1
-```
+如果这个视频以前已经生成过字幕，App 会自动加载本地字幕和学习进度。如果是新视频，先显示视频第一帧，等待你生成或导入字幕。
 
-脚本优先使用仓库内的 `models/nllb-200-distilled-600M`，所以仓库移动到其他目录后不需要修改绝对路径；本地模型不存在时才使用 Hugging Face 模型 ID。也可以在运行脚本前用 `TRANSLATION_MODEL` 指向其他本地目录或模型 ID。注意使用英文半角引号 `"..."`，不要使用中文弯引号 `“...”`。
+### 第三步：生成英文字幕和中文翻译
 
-## 不同环境的连接方法
+没有字幕的视频，点击“生成+”即可。v2.0.2 会优先使用电脑端持久化任务，流程是：
 
-日常使用优先用一键脚本：
+1. 手机按添加顺序提取视频音频。
+2. 手机计算音频 SHA-256；如果电脑已有相同音频，就跳过上传。
+3. 新音频按块上传；断网后从电脑保存的偏移继续。
+4. 同一批视频先完成全部音频上传，避免后面的任务一直留在手机里等待。
+5. 手机再按添加顺序提交任务；电脑放入单工作线程 FIFO 队列逐个处理。
+6. 电脑独立运行 Whisper 识别和中文翻译，手机定期查询队列位置、任务阶段和总进度。
+7. 电脑保存英文与双语结果；手机校验每条英文都有中文翻译后，再原子替换本地旧字幕。
 
-```powershell
-powershell -ExecutionPolicy Bypass -File tools/start_video_english_service.ps1
-```
+整批音频上传并取得电脑任务 ID 后，手机不需要保持持续连接。电脑会按 FIFO 顺序继续处理；手机再次联网或重新打开 App 后，会使用原任务 ID 继续显示队列位置、处理进度并取回结果。
 
-下面的 A/B/C/D/E 是高级排障和手动模式。一般不需要按环境分别运行这些旧脚本。
-
-### 方式 A：Android 模拟器
-
-在项目根目录运行：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File tools/start_remote_whisper_service.ps1
-```
-
-模拟器访问电脑主机要使用 Android Emulator 的特殊地址：
+连接方式会自动优先选择：
 
 ```text
-http://10.0.2.2:8765/transcribe
+USB/模拟器 -> 局域网 -> 公网 Cloudflare Tunnel
 ```
 
-在 App 里长按“生成”，填上这个地址，点“测试”，成功后再点“生成”。
+每次连接都会先做短超时探测：手机连着 USB 时优先走 USB；拔掉 USB 后自动尝试局域网；局域网不可达时再尝试公网地址。某条线路中断只影响手机本次上传或进度同步，不会终止电脑端已提交的任务。
 
-### 方式 B：真机 USB 调试
+如果刚拔掉 USB，页面可能短暂显示“等待连接电脑”；下一轮自动重试会切换到局域网或公网，无需取消任务、重新添加视频或手动改地址。
 
-适合开发调试。手机通过 USB 连接电脑并开启 USB 调试。
+### 第四步：逐句学习
 
-电脑端运行：
+字幕生成完成后，进入“学习”页开始逐句学习。
 
-```powershell
-powershell -ExecutionPolicy Bypass -File tools/start_remote_whisper_service.ps1
-```
+常用操作：
 
-这个脚本会启动 Whisper 服务，并尝试自动配置：
+- “播放”：播放当前句。
+- “上一句 / 下一句”：按字幕句子跳转。
+- “单次 / 循环”：控制当前句播放一次还是循环播放。
+- “复读”：重复当前句。
+- “英文 / 中文 / 双语”：切换字幕显示方式。
+- “早 0.5 秒 / 晚 0.5 秒”：微调当前字幕时间。
+- “生成+”：首次生成双语字幕，或选择重新识别并翻译/仅重翻中文。
+- “导出”：导出英文或中英双语 SRT 字幕。
 
-```powershell
-adb reverse tcp:8765 tcp:8765
-```
+首次进入学习页默认是“单次”。播放终点会在字幕句尾后保留很短的尾音空间，同时以下一句开始时间为上限，减少最后一个词被切掉或读到下一句开头。
 
-如果你想手动配置，也可以运行：
+### 第五步：查词和复习
 
-```powershell
-adb devices
-adb reverse --remove tcp:8765
-adb reverse tcp:8765 tcp:8765
-```
+学习时点击当前英文句子里的单词，可以查看释义和发音。查过的单词会自动进入“我的 -> 单词本”。
 
-App 里长按“生成”，服务地址填：
+单词本按日期整理，例句来自视频原句。点击例句可以回到对应视频位置，适合用真实语境复习单词。
+
+## 四个页面怎么用
+
+### 学习
+
+学习页是日常使用最多的页面，用来播放视频、逐句听力、查词、切换字幕和导出字幕。
+
+如果当前视频已经有字幕，打开后会自动恢复上次离开的位置，包括视频进度、当前句和字幕列表位置。
+
+### 生成字幕中
+
+这个页面专门负责后台生成字幕和翻译。你可以一次添加多个视频；App 先上传全部音频，电脑再按添加顺序逐个处理。每个任务会显示选出的可见视频帧、文件名、总进度、上传字节进度、电脑端阶段/队列位置、电脑任务 ID、最后同步时间、连接方式和操作按钮。
+
+任务阶段一般包括：
 
 ```text
-http://127.0.0.1:8765/transcribe
+等待中 -> 提取音频 -> 上传音频 -> 等待电脑队列 -> 识别英文字幕 -> 翻译中文字幕 -> 保存字幕 -> 完成
 ```
 
-点“测试”，提示连接正常后，再点“生成”。
+手机侧任务在通知栏以前台服务持续运行，可以正常锁屏或切换到其他应用。所有音频会优先上传，已提交任务随后与手机连接解耦；暂时断网只会让手机显示“等待连接电脑”，不会终止电脑识别或翻译。恢复连接后会自动切换可用线路并继续查询。部分国产系统仍建议允许本 App 后台活动并关闭省电限制。
 
-如果电脑服务实际端口不是 8765，例如 8767：
+### 已完成
 
-```powershell
-adb reverse --remove tcp:8765
-adb reverse tcp:8765 tcp:8767
-```
+已完成页面集中显示已经生成好中英双语字幕的视频。你可以直接开始学习、导出、点“重生成”重新识别并翻译，或点“重翻”只更新中文。重生成期间旧字幕仍可使用，直到新双语字幕完整生成。
 
-手机端地址仍然填：
+删除时会提示你选择：只删除任务记录，还是连本地字幕缓存一起删除。
 
-```text
-http://127.0.0.1:8765/transcribe
-```
+### 我的
 
-### 方式 C：手机和电脑在同一个局域网
+我的页面包含单词本、使用说明、电脑端服务说明、作者信息、GitHub 链接、隐私说明和版本信息。
 
-如果手机和电脑在同一个 Wi-Fi，可以不连接 USB，也不需要 `adb reverse`。
+GitHub 链接用于查看开源项目和下载最新版本安装包。
 
-电脑端运行：
+## 电脑端服务说明
+
+### 一键启动
+
+日常只需要运行：
 
 ```powershell
 cd C:\tmp\video-english-learning-remote
-powershell -ExecutionPolicy Bypass -File tools/start_lan_whisper_service.ps1
+powershell -ExecutionPolicy Bypass -File tools/start_video_english_service_v2.0.2.ps1
 ```
 
-服务窗口会打印可用地址，例如：
+v2.0.2 的启动入口已带版本号。保持这个 PowerShell 窗口打开，电脑端会显示当前模型、连接地址、GPU 使用情况、识别进度和翻译进度。
+
+### 电脑端持久化目录
+
+v2.0.2 默认把可复用数据放在项目根目录的 `service_data` 中：
 
 ```text
-http://192.168.0.133:8765/transcribe
+service_data/
+  audio/       按音频 SHA-256 保存的原始音频
+  cache/       每个音频的 english.json 和 bilingual.json
+  jobs/        每个电脑任务的 status.json、result.json 和输入数据
+  uploads/     尚未完成的分块上传和偏移信息
 ```
 
-App 里长按“生成”，填服务窗口打印的地址。注意不要填 `127.0.0.1`，在手机上 `127.0.0.1` 指的是手机自己，不是电脑。
+这些文件不会在任务结束后自动删除，因此重新识别可以直接复用音频，仅重翻可以直接复用英文字幕，手机短暂离线或电脑服务重启也不会丢失任务结果。目录已加入 `.gitignore`，不会上传到 GitHub。
+电脑端使用持久化 FIFO 队列：同一时刻只运行一个 Whisper/翻译任务，其余任务保存队列位置并按创建顺序等待；服务重启后会从磁盘恢复未完成任务并继续按顺序处理。
 
-可以用下面的脚本做电脑端自检：
+如需把缓存放到其他磁盘，启动前设置：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File tools/test_lan_whisper_service.ps1
+$env:VIDEO_ENGLISH_DATA_DIR="D:\video-english-service-data"
+powershell -ExecutionPolicy Bypass -File tools/start_video_english_service_v2.0.2.ps1
 ```
 
-如果手机无法连通，通常是以下原因：
+删除 `service_data`（或你自定义的目录）会清除电脑端音频、任务和字幕缓存；不会删除手机里的视频及已经保存到手机的字幕。
 
-- 手机和电脑没有连到同一个 Wi-Fi。
-- 手机连了访客网络，路由器开启了“AP 隔离/客户端隔离”。
-- Windows 防火墙没有允许 Python 在“专用网络”通信。
-- App 地址填成了虚拟网卡 IP、`127.0.0.1`、`10.0.2.2` 或已经变化的旧电脑 IP。
-- 电脑进入睡眠，或 PowerShell 服务窗口被关闭。
-
-局域网默认不启用 token。如果你用 `-UseAuth` 启动，或环境里主动设置了 `WHISPER_AUTH_TOKEN`，服务窗口会打印带 token 的完整地址，例如：
+停止服务时按：
 
 ```text
-http://192.168.0.133:8765/transcribe?token=xxxx
+Ctrl + C
 ```
 
-这种情况下 App 必须填写完整地址，否则会出现 `HTTP 401` 或 `Broken pipe`。
+### USB 连接
 
-### 方式 D：手机用流量、异地或不在同一个局域网
+手机用 USB 连接电脑，并开启 USB 调试后，App 会优先走 USB 地址：
 
-这种情况不要直接把 Python 服务端口暴露到公网。推荐用 Cloudflare Tunnel 建一个临时 HTTPS 地址。
+```text
+http://127.0.0.1:8765/transcribe?token=你的token
+```
 
-先安装 `cloudflared`，二选一：
+这是最稳定、最快的方式，推荐调试和长视频处理时使用。
+
+### 局域网连接
+
+如果手机和电脑在同一个 Wi-Fi，可以使用局域网地址，例如：
+
+```text
+http://192.168.0.126:8765/transcribe?token=你的token
+```
+
+如果手机连不上，请检查：
+
+- 手机和电脑是否在同一个 Wi-Fi。
+- 路由器是否开启了访客网络隔离或 AP 隔离。
+- Windows 防火墙是否允许 Python 在专用网络中通信。
+- 手机端填写的是电脑的局域网 IPv4 地址，不是 `127.0.0.1`。
+
+### 手机流量或异地连接
+
+如果手机使用流量，或者手机和电脑不在同一个局域网，就必须使用公网备用地址。脚本会通过 Cloudflare Tunnel 生成一个临时 HTTPS 地址，例如：
+
+```text
+https://xxxx.trycloudflare.com/transcribe?token=你的token
+```
+
+公网地址生成后会显示在 PowerShell 窗口，也会写入：
+
+```text
+tools/latest_service_urls.txt
+```
+
+注意：Cloudflare 免费临时隧道不是永久地址。每次重新启动服务后，公网地址可能会变化，需要在手机端重新填写或等待 App 自动更新。
+
+如果电脑没有安装 `cloudflared`，可以安装：
 
 ```powershell
 winget install --id Cloudflare.cloudflared
 ```
 
-或者下载 `cloudflared-windows-amd64.exe`，放到：
+或者把 `cloudflared.exe` 放到项目的 `tools` 目录下。
 
-```text
-tools/cloudflared.exe
-```
+## 模型和 GPU
 
-电脑端只需要开一个 PowerShell 窗口运行：
+电脑端默认使用本地模型，模型文件放在 `models` 目录下。
 
-```powershell
-powershell -ExecutionPolicy Bypass -File tools/start_public_whisper_service.ps1
-```
+推荐模型配置：
 
-这个脚本会同时做两件事：
+| 功能 | 默认模型 | 说明 |
+| --- | --- | --- |
+| 英文字幕识别 | `models/faster-whisper-large-v3` | 更适合提高英文识别准确率，推荐配合 GPU 使用 |
+| 语言检测 | `models/faster-whisper-small` | 用于快速判断音频语言 |
+| 中文翻译 | `models/nllb-200-distilled-600M` | 用于把英文字幕翻译成简体中文 |
 
-- 启动本机 Whisper 服务。
-- 启动 Cloudflare Tunnel，并生成一个 `https://xxxxx.trycloudflare.com` 公网地址。
-
-窗口前面会打印类似：
-
-```text
-Auth token: 8f3a...
-After cloudflared prints an https://xxxxx.trycloudflare.com URL, use this in the Android app:
-  https://xxxxx.trycloudflare.com/transcribe?token=8f3a...
-```
-
-等 Cloudflare 输出这一行：
-
-```text
-Your quick Tunnel has been created! Visit it at:
-https://twisted-priced-elevation-volt.trycloudflare.com
-```
-
-把上面的域名替换进 App 地址，最终应类似：
-
-```text
-https://twisted-priced-elevation-volt.trycloudflare.com/transcribe?token=8f3a...
-```
-
-App 里长按“生成”，填这个完整 HTTPS 地址，点“测试”，成功后再点“生成”。手机可以关 Wi-Fi 只用 4G/5G 测试。
-
-如果手机没有 USB 连接电脑，也不在同一个局域网，只用手机流量直接点“生成”，App 没办法自动知道电脑刚生成的 Cloudflare 临时域名。这种情况下必须先长按“生成”，手动填写电脑窗口打印的完整公网地址，例如 `https://真实域名.trycloudflare.com/transcribe?token=真实token`。如果你先用 USB 或局域网连通过一次，一键脚本会把新的公网候选地址同步给 App，之后拔掉 USB 或切到流量时才可能自动回退到公网地址。
-
-如果脚本提示类似下面这样：
-
-```text
-Port 8766 is already in use.
-Do not expose an old or unauthenticated Whisper service to the public internet.
-```
-
-说明这一轮服务没有真正启动，也没有生成新的可用公网地址。此时不要把窗口上方刚打印的 token 填进手机。你需要二选一：
-
-1. 关闭旧的 Whisper/Cloudflare PowerShell 窗口，再重新运行脚本。
-2. 换一个端口启动，例如：
+检查 GPU 和模型是否可用：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File tools/start_public_whisper_service.ps1 -Port 8767
+cd C:\tmp\video-english-learning-remote
+python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"
+python -c "import ctranslate2; print(ctranslate2.get_cuda_device_count())"
+powershell -ExecutionPolicy Bypass -File tools/test_gpu_models.ps1
 ```
 
-只有当你看到 Cloudflare 打印了真实域名，例如 `https://thriller-sacred-divided-appraisal.trycloudflare.com`，才把它和同一窗口里的 `Auth token` 组合成手机端地址：
+如果提示缺少 CUDA 相关 DLL，例如 `cublas64_12.dll`，需要安装匹配的 CUDA / cuDNN 运行环境，或者安装带 CUDA 支持的 Python 依赖。
 
-```text
-https://thriller-sacred-divided-appraisal.trycloudflare.com/transcribe?token=窗口里打印的AuthToken
-```
-
-不要填写 `https://xxxxx.trycloudflare.com/...`，也不要填写 `http://127.0.0.1:8766/...`。前者只是占位符，后者在手机流量环境下指向手机自己，不是电脑。
-
-公网自检脚本：
+使用清华源安装常用依赖时可以参考：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File tools/test_remote_whisper_service.ps1 -AppUrl "https://xxxxx.trycloudflare.com/transcribe?token=8f3a..."
+pip install -i https://pypi.tuna.tsinghua.edu.cn/simple torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+pip install -i https://pypi.tuna.tsinghua.edu.cn/simple faster-whisper ctranslate2 transformers sentencepiece sacremoses
 ```
 
-注意事项：
-
-- PowerShell 窗口必须一直开着。关闭窗口后，Cloudflare 地址会失效。
-- 每次重新启动 `start_public_whisper_service.ps1`，Cloudflare 免费临时域名通常会变化，需要重新填写 App 地址。
-- 使用一键脚本 `tools/start_video_english_service.ps1` 时也是同理：USB 和局域网地址可以自动探测；纯手机流量场景必须通过已同步的运行时配置或手动填写最新 Cloudflare 公网地址。
-- 不要把没有 token 的本地服务暴露到公网。
-- `start_public_whisper_service.ps1` 会自动生成安全 token；如果环境变量里误设了“你的token”这类占位文本，脚本也会忽略并重新生成。
-
-### 方式 E：手动启动服务
-
-如果你不想用脚本，也可以直接启动 Python 服务：
-
-```powershell
-$env:WHISPER_AUTH_TOKEN="change-this-token"
-$env:WHISPER_PORT="8765"
-python tools/local_whisper_service.py
-```
-
-本机检查：
-
-```powershell
-Invoke-WebRequest "http://127.0.0.1:8765/ping?token=change-this-token"
-```
-
-查看模型选择：
-
-```text
-http://127.0.0.1:8765/models?token=change-this-token
-```
-
-### GPU 加速
-
-推荐的一键脚本默认设置 `WHISPER_DEVICE=auto`、`WHISPER_COMPUTE_TYPE=auto` 和 `TRANSLATION_DEVICE=auto`。CTranslate2 和 PyTorch 各自检测成功后，Whisper 使用 `cuda/float16`，NLLB 使用 CUDA；任一运行时不可用时只有对应模型回退 CPU。
-
-如果使用 Clash Verge，建议把代理写成 HTTP 代理，例如 `http://127.0.0.1:7897`。优先使用清华 PyPI 源安装 CUDA 运行库：
+如果你使用 Clash Verge，且本机代理端口是 `7897`，可以临时设置：
 
 ```powershell
 $env:HTTP_PROXY="http://127.0.0.1:7897"
 $env:HTTPS_PROXY="http://127.0.0.1:7897"
-python -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple --force-reinstall `
-  nvidia-cublas-cu12==12.4.5.8 `
-  nvidia-cuda-runtime-cu12==12.4.127 `
-  nvidia-cuda-nvrtc-cu12==12.4.127 `
-  nvidia-cudnn-cu12==9.1.0.70
 ```
-
-如果 CTranslate2 在 Windows 上仍提示 `cublas64_12.dll is not found or cannot be loaded`，可以把上述包里的 CUDA DLL 复制到 `D:\Anaconda\Lib\site-packages\ctranslate2\`；当前项目调试环境已这样配置过。
-
-先检查两个 Python 运行时是否真的识别到 GPU：
-
-```powershell
-python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"
-python -c "import ctranslate2; print(ctranslate2.get_cuda_device_count())"
-```
-
-期望最后分别看到 `True` 和大于 `0` 的设备数。如果是 `torch ...+cpu`、`torch.version.cuda` 为 `None`，说明安装的是 CPU 版 PyTorch；请安装与本机驱动匹配的 CUDA 版 PyTorch。如果 CTranslate2 返回 `0`，请检查 NVIDIA 驱动、CUDA 12 runtime/cuBLAS 和 cuDNN 9。
-
-也可以直接跑项目自检脚本，它会真实调用 `models/faster-distil-whisper-large-v3` 做 GPU 识别，并调用 `models/nllb-200-distilled-600M` 做 GPU 翻译：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File tools/test_gpu_models.ps1
-```
-
-期望看到类似：
-
-```text
-Loading Whisper model ...faster-distil-whisper-large-v3 on cuda/float16...
-Using Transformers model ...nllb-200-distilled-600M on cuda (eng_Latn->zho_Hans)...
-```
-
-自动检测通过后直接启动：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File tools/start_video_english_service.ps1
-```
-
-如需严格要求 GPU、不可用时立即报错而不是回退，可在启动前设置 `$env:MODEL_DEVICE_FALLBACK="0"`，并把 `WHISPER_DEVICE`、`TRANSLATION_DEVICE` 都设为 `cuda`。
-
-## Android Studio 构建
-
-### 环境要求
-
-- Android Studio。
-- JDK 17。
-- Android SDK Platform 35。
-- Gradle Wrapper，仓库已包含 `gradlew` 和 `gradlew.bat`。
-- 如果启用手机端 `whisper.cpp` native 构建，还需要 Android NDK 和 CMake。
-
-建议把项目放在纯英文路径下。Windows 上 NDK/CMake/ninja 对中文路径兼容性不稳定。
-
-### 构建 debug APK
-
-```powershell
-.\gradlew.bat assembleDebug
-```
-
-输出位置：
-
-```text
-app/build/outputs/apk/debug/app-debug.apk
-```
-
-### 启用手机端 whisper.cpp native
-
-远程版本默认关闭手机端 native Whisper：
-
-```properties
-enableWhisperNative=false
-```
-
-如需启用：
-
-```powershell
-.\gradlew.bat -PenableWhisperNative=true assembleDebug
-```
-
-启用后需要准备 Android NDK/CMake，并把 GGML 模型放到手机 App 私有模型目录：
-
-```text
-/sdcard/Android/data/com.codex.videolearnenglish.remote/files/models/
-```
-
-App 查找顺序：
-
-```text
-ggml-medium.en.bin
-ggml-small.en.bin
-ggml-base.en.bin
-ggml-tiny.en.bin
-```
-
-英语学习建议至少使用 `small.en`。
-
-## 字幕缓存和学习数据
-
-字幕缓存保存在 App 私有目录：
-
-```text
-filesDir/subtitles_cache/<video-uri-sha256>.json
-```
-
-单词本保存在：
-
-```text
-filesDir/wordbook_history.json
-```
-
-卸载 App 会删除这些私有数据。重新安装或清除应用数据后，需要重新导入或生成字幕。
-
-## 远程服务 API
-
-App 当前主要使用异步任务接口：
-
-```text
-POST /jobs?token=<WHISPER_AUTH_TOKEN>
-GET /jobs/<job_id>?token=<WHISPER_AUTH_TOKEN>
-```
-
-辅助接口：
-
-```text
-GET /ping
-GET /models?token=<WHISPER_AUTH_TOKEN>
-GET /transcribe?video=backpacking
-POST /transcribe?token=<WHISPER_AUTH_TOKEN>
-POST /translate?token=<WHISPER_AUTH_TOKEN>
-```
-
-返回字幕格式：
-
-```json
-[
-  {
-    "start": 1.23,
-    "end": 4.56,
-    "text": "This is an English sentence.",
-    "translation": "这是一个英文句子。"
-  }
-]
-```
-
-`POST /translate` 用于只给已有英文字幕补中文翻译。请求体示例：
-
-```json
-{
-  "texts": [
-    "But we don't get to go straight as the crow flies.",
-    "This is the lost way around Africa."
-  ]
-}
-```
-
-返回格式：
-
-```json
-{
-  "translations": [
-    "但我们不能走直线过去。",
-    "这是绕行非洲的迷路路线。"
-  ]
-}
-```
-
-## 仓库结构
-
-```text
-app/                         Android App 源码
-app/src/main/java/...         Kotlin 主逻辑
-app/src/main/cpp/             whisper.cpp JNI 桥接层
-app/src/main/assets/          词典和示例字幕
-tools/local_whisper_service.py 电脑端 Whisper HTTP 服务
-tools/start_video_english_service.ps1 推荐的一键启动脚本：字幕、翻译、USB、局域网、公网候选地址自动配置
-tools/start_remote_whisper_service.ps1 USB/通用启动脚本，会自动配置 adb reverse
-tools/start_lan_whisper_service.ps1    局域网启动脚本，会打印手机应填写的电脑 IP 地址
-tools/test_lan_whisper_service.ps1     局域网服务自检脚本
-tools/start_public_whisper_service.ps1 公网/手机流量一键脚本，会启动服务并创建 Cloudflare Tunnel
-tools/test_remote_whisper_service.ps1  公网服务自检脚本
-tools/start_cloudflare_tunnel.ps1      旧版 Cloudflare Tunnel 辅助脚本，通常不需要手动使用
-third_party/whisper.cpp       whisper.cpp Git submodule
-release/                      可安装 APK 和校验文件
-requirements.txt              Python 服务依赖
-REMOTE_WHISPER.md             远程字幕服务简明说明
-```
-
-## 克隆仓库
-
-因为 `third_party/whisper.cpp` 是 submodule，建议这样克隆：
-
-```powershell
-git clone --recursive <你的仓库地址>
-```
-
-如果已经普通克隆：
-
-```powershell
-git submodule update --init --recursive
-```
-
-## 开源注意事项
-
-- `local.properties`、`.idea/`、`.gradle/`、`app/build/` 等本机文件不会入库。
-- `models/` 和 `*.bin` 默认忽略，避免把大型模型文件提交到 Git。
-- `release/` 中的 APK 会被允许入库，便于用户直接下载安装。
-- 远程服务 token 不要写进仓库；推荐使用 `tools/start_video_english_service.ps1` 自动生成一次性 token。脚本生成的 `tools/runtime_service_config.json` 是本机运行时配置，已被 Git 忽略。
-- 该项目源码使用 MIT License。`third_party/whisper.cpp` 遵循其上游许可证。
 
 ## 常见问题
 
-### 点“生成”后连接失败
+### 1. 手机端提示连接失败
 
-先确认电脑端只运行这一行，并保持窗口打开：
+先确认电脑端服务窗口没有关闭。v2.0.3 会自动按以下顺序探测地址：
 
-```powershell
-powershell -ExecutionPolicy Bypass -File tools/start_video_english_service.ps1
-```
+- USB 连接电脑：用 USB/模拟器地址。
+- 同一个 Wi-Fi：用局域网地址。
+- 手机流量：用公网备用地址。
 
-新版 App 会自动尝试 USB、局域网和公网候选地址。排查顺序：
+正常情况下拔掉 USB 后会在最长约 10 秒内改走局域网或公网，任务卡会清除已经失效的 USB 标签；重新插入同一部手机后，启动脚本会自动补回 `adb reverse tcp:8765 tcp:8765`，不需要重启脚本。如果所有地址都失败，再打开 `tools/latest_service_urls.txt`，确认里面是本次启动产生的最新地址；也可以把完整地址复制到手机端测试。
 
-- USB 真机：确认手机已开启 USB 调试并允许本电脑调试；一键脚本会每隔几秒自动配置 `adb reverse`。
-- 同一 Wi-Fi：确认手机和电脑在同一个局域网，Windows 防火墙允许 Python 通信。
-- 手机流量/异地：确认电脑已安装 `cloudflared`，并且一键脚本窗口里已经打印 Cloudflare 公网地址。
-- 如果仍失败，长按“生成”，把一键脚本窗口打印的完整地址手动填进去，再点“测试”。
+如果 USB 调试授权被手机撤销，仍需在手机弹窗中重新允许 USB 调试。可以用 `adb devices` 确认设备状态是 `device`，而不是 `unauthorized` 或 `offline`。
 
-### 生成字幕失败，提示 `HTTP 401`
+### 2. 手机用流量时不能生成字幕
 
-这是 token 不匹配。新版一键脚本会自动生成 token，App 正常会从 `/config` 读取带 token 的候选地址。如果你手动填写地址，必须复制 PowerShell 窗口打印的完整地址，不能漏掉 `?token=...`。
-
-### 生成字幕失败，提示 `Broken pipe`
-
-通常是上传过程中连接被中断。先不要关闭手机 App 和电脑 PowerShell 窗口，再点“生成”重试；App 会保留已抽取的音频缓存，下次通常可以直接重试上传。公网模式下还要确认一键脚本窗口仍在运行，且 Cloudflare Tunnel 没有断开。
-
-### 生成字幕失败，提示 `unexpected end of stream`
-
-多数情况下是公网 Cloudflare 地址已经失效、填了旧 tunnel、填了占位域名 `xxxxx.trycloudflare.com`，或电脑端服务窗口已经关闭。重新运行一键脚本：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File tools/start_video_english_service.ps1
-```
-
-等待 Cloudflare 打印真实 `https://...trycloudflare.com` 域名。App 如果曾通过 USB 或局域网连到电脑，会自动读取新公网候选地址；否则可以长按“生成”手动填完整地址：
+手机流量无法访问电脑的 `127.0.0.1` 和局域网地址，必须使用 Cloudflare Tunnel 的公网 HTTPS 地址。这个地址由电脑端脚本生成，显示为：
 
 ```text
-https://真实域名.trycloudflare.com/transcribe?token=同一窗口里的AuthToken
+https://xxxx.trycloudflare.com/transcribe?token=...
 ```
 
-如果脚本提示端口已被占用，这一轮没有启动成功，需要先关闭旧窗口或换端口，例如 `-Port 8767`。
+如果没有看到公网地址，说明 Cloudflare Tunnel 没有启动成功，需要检查 `cloudflared.exe` 是否安装，以及当前网络是否能连接 Cloudflare。
 
-### 切到后台后生成字幕失败
+### 3. 提示 HTTP 401
 
-电脑端确实负责 Whisper 识别和翻译，但手机仍要负责上传音频和轮询任务结果。新版 App 会用前台服务、CPU 唤醒锁和 Wi-Fi 锁支持后台、锁屏继续生成；通知栏进度应该继续变化。如果仍失败，通常是系统电池策略限制了后台网络。请在系统电池设置里允许“看视频学英语”后台运行，并允许通知权限，不要在生成过程中手动清理后台或关闭电脑端服务窗口。
+这是 token 不匹配。请使用电脑端窗口或 `tools/latest_service_urls.txt` 里完整的地址，确保 `?token=...` 没有漏掉。
 
-### 生成很慢
+### 4. 提示 Broken pipe、unexpected end of stream 或上传中断
 
-先按“GPU 加速”一节运行两条检测命令。一键脚本会自动选择 GPU；如果日志显示回退 CPU，需修复对应的 CTranslate2 或 PyTorch CUDA 环境。GPU 环境暂时无法升级时，可以把 `WHISPER_ENGLISH_MODEL` 设为 `medium` 或 `small`。
+v2.0.2 会把音频分块上传并由电脑持久化已确认偏移。网络恢复后，手机会先查询偏移再继续传剩余部分，不会从 0% 重传。音频上传完成后，电脑任务继续运行，不依赖手机保持在线；手机只需要稍后用原任务 ID 查询进度和结果。
 
-### 中文字幕为空
+长视频建议优先使用 USB 或局域网连接，稳定性比公网更好。
 
-App 会优先请求电脑端 `/translate` 接口补翻译。如果没有安装翻译依赖、模型第一次下载失败，或你填写的 Whisper 地址不可达，就可能只显示英文字幕。先确认电脑端服务能正常生成字幕，再确认启动前设置的翻译环境变量是否正确：
+如果页面显示“等待连接电脑”，保持电脑服务运行即可。手机会自动重试，不需要取消任务或重新添加视频。
+
+### 5. 翻译进度停在某个百分比很久
+
+长视频翻译需要分批处理。某些批次句子较长，或者模型首次加载较慢，看起来会停留一段时间。电脑端窗口会显示更细的批次进度和模型状态，可以用来判断是否仍在运行。
+
+### 6. 字幕和声音有轻微错位
+
+可以在学习页使用“早 0.5 秒”和“晚 0.5 秒”微调当前字幕。如果是整段字幕都偏移，可以导出 SRT 后用字幕工具批量调整，再重新导入。
+
+### 7. 中文字幕效果不理想
+
+优先确认当前是否使用电脑端翻译。手机端翻译速度快，但准确性通常不如电脑端模型。建议启动电脑端服务后，长按字幕显示相关按钮，选择重新使用电脑端翻译。
+
+## 数据保存和隐私
+
+- 视频文件保存在你自己的手机里，App 不会主动上传到公共服务器。
+- 只有在你点击生成字幕或翻译时，App 才会把提取出的音频发送到你自己配置的电脑端服务；电脑端默认会把音频保存在 `service_data/audio` 供以后复用。
+- 字幕、翻译、学习进度和单词本会保存在手机本地。
+- 电脑端还会在 `service_data/cache` 和 `service_data/jobs` 保存英文字幕、双语字幕、任务进度与结果。需要清除时由你手动删除该目录。
+- 使用 Cloudflare Tunnel 时，数据会经过 Cloudflare 临时隧道转发，适合个人临时使用，不建议暴露给陌生人使用。
+
+## 开发和构建
+
+这是一个 Android 项目，可以用 Android Studio 打开。
+
+常用构建命令：
 
 ```powershell
-$env:TRANSLATION_PROVIDER="transformers"
-$env:TRANSLATION_MODEL="models/nllb-200-distilled-600M"
-$env:TRANSLATION_DEVICE="auto"
+cd C:\tmp\video-english-learning-remote
+.\gradlew.bat assembleDebug
+.\gradlew.bat assembleRelease
 ```
 
-然后重新启动对应脚本。手机端不需要额外填写翻译地址，只需要保证长按“生成”里填写的是正确的 `/transcribe` 地址。电脑端翻译不可用时，英文字幕仍会保留；修好电脑端服务后，长按“英文/双语/中文”选择“电脑端重翻”即可重新获取中文字幕。也可以在同一个弹窗里选择“手机端重翻”，使用 ML Kit 英译中作为备用方案。
+常用测试命令：
 
-如果看到下面这种错误：
+```powershell
+.\gradlew.bat testDebugUnitTest
+```
+
+电脑端服务主要文件：
 
 ```text
-translation failed: could not load translation model: check_hostname requires server_hostname
+tools/start_video_english_service_v2.0.2.ps1
+tools/local_whisper_service_v2.0.2.py
+tools/start_video_english_service.ps1          旧版入口（保留）
+tools/local_whisper_service.py                 旧版服务（保留）
+tools/test_gpu_models.ps1
 ```
 
-通常是 Windows/Python 继承了不兼容的本地代理环境变量，例如把 `HTTPS_PROXY` 写成了 `https://127.0.0.1:7890`。新版 `tools/start_video_english_service.ps1` 会自动把这类本地代理修正为 `http://127.0.0.1:7890`。处理方法：
-
-1. 关闭旧的 PowerShell 服务窗口。
-2. 重新运行一键脚本：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File tools/start_video_english_service.ps1
-```
-
-如果仍失败，在同一个 PowerShell 里检查代理变量：
-
-```powershell
-Get-ChildItem Env:*proxy*
-```
-
-把本地 HTTP 代理写成 `http://127.0.0.1:端口`，不要写成 `https://127.0.0.1:端口`。仓库内没有 `models/nllb-200-distilled-600M` 时，翻译模型第一次加载需要联网下载 `facebook/nllb-200-distilled-600M`，下载成功后会缓存到电脑本地。
-
-### 字幕有轻微提前或延后
-
-使用“早0.5秒”或“晚0.5秒”调整整体偏移。识别质量和时间轴还取决于视频音频质量、背景噪声和模型大小。
-
-### Windows 构建 native 报中文路径错误
-
-把项目复制到纯英文路径，例如：
+Android 端主要代码：
 
 ```text
-C:\AndroidProjects\video-english-learning-remote
+app/src/main/java/com/example/videoenglishlearning/MainActivity.kt
 ```
 
-再用 Android Studio 打开。
+## 目录结构
+
+```text
+app/                         Android App 源码
+models/                      本地 Whisper 和翻译模型
+release/                     已打包 APK
+tools/                       电脑端服务脚本和调试工具
+README.md                    项目说明
+```
+
+## GitHub 和更新
+
+项目开源在 GitHub。用户可以通过“我的 -> GitHub”打开项目主页，查看说明、下载新版 APK、反馈问题或参与改进。
+
+如果你只是安装使用，推荐下载 `release/app-v2.0.3.apk`。如果你想自己改代码，可以 clone 项目后用 Android Studio 打开。
+
+## 作者
+
+作者：强哥
+
+这个项目的目标不是做一个复杂的播放器，而是让“看自己喜欢的视频学英语”这件事更顺手：先自动生成字幕和翻译，再围绕真实句子反复听、查词、复习和回到原场景。

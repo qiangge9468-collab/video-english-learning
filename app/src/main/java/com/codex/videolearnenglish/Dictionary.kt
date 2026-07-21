@@ -9,7 +9,9 @@ data class LookupResult(
     val term: String,
     val phonetic: String = "",
     val meaning: String,
-    val definition: String = ""
+    val definition: String = "",
+    val lemma: String = "",
+    val inflection: String = ""
 )
 
 class Dictionary(private val context: Context) {
@@ -39,6 +41,155 @@ class Dictionary(private val context: Context) {
 
         return LookupResult(term, meaning = "本地词典暂未收录。")
     }
+    fun lookupRich(rawText: String): LookupResult {
+        val term = cleanTerm(rawText)
+        if (term.isBlank() || term.contains(' ')) return lookup(rawText)
+
+        val exact = lookupDatabase(term)
+        for ((lemma, formLabel) in lemmaCandidates(term)) {
+            val base = lookupDatabase(lemma) ?: continue
+            return LookupResult(
+                term = term,
+                phonetic = exact?.phonetic?.takeIf { it.isNotBlank() } ?: base.phonetic,
+                meaning = summarizeMeaning(base.meaning),
+                definition = summarizeDefinition(base.definition),
+                lemma = lemma,
+                inflection = formLabel
+            )
+        }
+
+        return exact?.copy(
+            meaning = summarizeMeaning(exact.meaning),
+            definition = summarizeDefinition(exact.definition)
+        ) ?: lookup(rawText)
+    }
+
+    private fun lemmaCandidates(word: String): List<Pair<String, String>> {
+        irregularForms[word]?.let { return listOf(it) }
+        if (word in nonInflectedWords) return emptyList()
+
+        val candidates = linkedSetOf<String>()
+        val formLabel = when {
+            word.endsWith("ies") && word.length > 4 -> {
+                candidates += word.dropLast(3) + "y"
+                "\u590d\u6570\u6216\u7b2c\u4e09\u4eba\u79f0\u5355\u6570"
+            }
+            word.endsWith("ing") && word.length > 5 -> {
+                val stem = word.dropLast(3)
+                if (stem.length > 2 && stem.last() == stem[stem.lastIndex - 1] && stem.last() in doubledInflectionConsonants) {
+                    candidates += stem.dropLast(1)
+                }
+                candidates += stem
+                candidates += stem + "e"
+                "\u73b0\u5728\u5206\u8bcd\u6216\u52a8\u540d\u8bcd"
+            }
+            word.endsWith("ied") && word.length > 4 -> {
+                candidates += word.dropLast(3) + "y"
+                "\u8fc7\u53bb\u5f0f\u6216\u8fc7\u53bb\u5206\u8bcd"
+            }
+            word.endsWith("ed") && word.length > 4 -> {
+                val stem = word.dropLast(2)
+                if (stem.length > 2 && stem.last() == stem[stem.lastIndex - 1] && stem.last() in doubledInflectionConsonants) {
+                    candidates += stem.dropLast(1)
+                }
+                candidates += stem
+                candidates += word.dropLast(1)
+                "\u8fc7\u53bb\u5f0f\u6216\u8fc7\u53bb\u5206\u8bcd"
+            }
+            word.endsWith("es") && word.length > 4 -> {
+                candidates += word.dropLast(2)
+                candidates += word.dropLast(1)
+                "\u590d\u6570\u6216\u7b2c\u4e09\u4eba\u79f0\u5355\u6570"
+            }
+            word.endsWith("s") && word.length > 3 -> {
+                candidates += word.dropLast(1)
+                "\u590d\u6570\u6216\u7b2c\u4e09\u4eba\u79f0\u5355\u6570"
+            }
+            else -> return emptyList()
+        }
+        return candidates.filter { it != word }.map { it to formLabel }
+    }
+
+    private fun summarizeMeaning(text: String): String {
+        return text.lineSequence()
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .take(5)
+            .joinToString("\n")
+            .take(360)
+    }
+
+    private fun summarizeDefinition(text: String): String {
+        return text.lineSequence()
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .take(3)
+            .joinToString("\n")
+            .take(420)
+    }
+
+    private val nonInflectedWords = setOf(
+        "news", "series", "species", "physics", "mathematics", "this", "his", "is", "was"
+    )
+
+
+    private val doubledInflectionConsonants = setOf('b', 'd', 'g', 'm', 'n', 'p', 'r', 't')
+    private val irregularForms = mapOf(
+        "am" to ("be" to "\u7b2c\u4e00\u4eba\u79f0\u5355\u6570"),
+        "is" to ("be" to "\u7b2c\u4e09\u4eba\u79f0\u5355\u6570"),
+        "are" to ("be" to "\u73b0\u5728\u65f6"),
+        "was" to ("be" to "\u8fc7\u53bb\u5f0f"),
+        "were" to ("be" to "\u8fc7\u53bb\u5f0f"),
+        "been" to ("be" to "\u8fc7\u53bb\u5206\u8bcd"),
+        "being" to ("be" to "\u73b0\u5728\u5206\u8bcd"),
+        "has" to ("have" to "\u7b2c\u4e09\u4eba\u79f0\u5355\u6570"),
+        "had" to ("have" to "\u8fc7\u53bb\u5f0f\u6216\u8fc7\u53bb\u5206\u8bcd"),
+        "does" to ("do" to "\u7b2c\u4e09\u4eba\u79f0\u5355\u6570"),
+        "did" to ("do" to "\u8fc7\u53bb\u5f0f"),
+        "done" to ("do" to "\u8fc7\u53bb\u5206\u8bcd"),
+        "went" to ("go" to "\u8fc7\u53bb\u5f0f"),
+        "gone" to ("go" to "\u8fc7\u53bb\u5206\u8bcd"),
+        "made" to ("make" to "\u8fc7\u53bb\u5f0f\u6216\u8fc7\u53bb\u5206\u8bcd"),
+        "took" to ("take" to "\u8fc7\u53bb\u5f0f"),
+        "taken" to ("take" to "\u8fc7\u53bb\u5206\u8bcd"),
+        "came" to ("come" to "\u8fc7\u53bb\u5f0f"),
+        "saw" to ("see" to "\u8fc7\u53bb\u5f0f"),
+        "seen" to ("see" to "\u8fc7\u53bb\u5206\u8bcd"),
+        "got" to ("get" to "\u8fc7\u53bb\u5f0f\u6216\u8fc7\u53bb\u5206\u8bcd"),
+        "gave" to ("give" to "\u8fc7\u53bb\u5f0f"),
+        "given" to ("give" to "\u8fc7\u53bb\u5206\u8bcd"),
+        "found" to ("find" to "\u8fc7\u53bb\u5f0f\u6216\u8fc7\u53bb\u5206\u8bcd"),
+        "thought" to ("think" to "\u8fc7\u53bb\u5f0f\u6216\u8fc7\u53bb\u5206\u8bcd"),
+        "knew" to ("know" to "\u8fc7\u53bb\u5f0f"),
+        "known" to ("know" to "\u8fc7\u53bb\u5206\u8bcd"),
+        "said" to ("say" to "\u8fc7\u53bb\u5f0f\u6216\u8fc7\u53bb\u5206\u8bcd"),
+        "told" to ("tell" to "\u8fc7\u53bb\u5f0f\u6216\u8fc7\u53bb\u5206\u8bcd"),
+        "felt" to ("feel" to "\u8fc7\u53bb\u5f0f\u6216\u8fc7\u53bb\u5206\u8bcd"),
+        "left" to ("leave" to "\u8fc7\u53bb\u5f0f\u6216\u8fc7\u53bb\u5206\u8bcd"),
+        "kept" to ("keep" to "\u8fc7\u53bb\u5f0f\u6216\u8fc7\u53bb\u5206\u8bcd"),
+        "heard" to ("hear" to "\u8fc7\u53bb\u5f0f\u6216\u8fc7\u53bb\u5206\u8bcd"),
+        "caught" to ("catch" to "\u8fc7\u53bb\u5f0f\u6216\u8fc7\u53bb\u5206\u8bcd"),
+        "bought" to ("buy" to "\u8fc7\u53bb\u5f0f\u6216\u8fc7\u53bb\u5206\u8bcd"),
+        "brought" to ("bring" to "\u8fc7\u53bb\u5f0f\u6216\u8fc7\u53bb\u5206\u8bcd"),
+        "wrote" to ("write" to "\u8fc7\u53bb\u5f0f"),
+        "written" to ("write" to "\u8fc7\u53bb\u5206\u8bcd"),
+        "spoke" to ("speak" to "\u8fc7\u53bb\u5f0f"),
+        "spoken" to ("speak" to "\u8fc7\u53bb\u5206\u8bcd"),
+        "ran" to ("run" to "\u8fc7\u53bb\u5f0f"),
+        "ate" to ("eat" to "\u8fc7\u53bb\u5f0f"),
+        "eaten" to ("eat" to "\u8fc7\u53bb\u5206\u8bcd"),
+        "wore" to ("wear" to "\u8fc7\u53bb\u5f0f"),
+        "worn" to ("wear" to "\u8fc7\u53bb\u5206\u8bcd"),
+        "chose" to ("choose" to "\u8fc7\u53bb\u5f0f"),
+        "chosen" to ("choose" to "\u8fc7\u53bb\u5206\u8bcd"),
+        "built" to ("build" to "\u8fc7\u53bb\u5f0f\u6216\u8fc7\u53bb\u5206\u8bcd"),
+        "lost" to ("lose" to "\u8fc7\u53bb\u5f0f\u6216\u8fc7\u53bb\u5206\u8bcd"),
+        "met" to ("meet" to "\u8fc7\u53bb\u5f0f\u6216\u8fc7\u53bb\u5206\u8bcd"),
+        "stood" to ("stand" to "\u8fc7\u53bb\u5f0f\u6216\u8fc7\u53bb\u5206\u8bcd"),
+        "understood" to ("understand" to "\u8fc7\u53bb\u5f0f\u6216\u8fc7\u53bb\u5206\u8bcd")
+    )
+
+
 
     private fun openBundledDatabase(): SQLiteDatabase? {
         val dbName = "dictionary.db"
