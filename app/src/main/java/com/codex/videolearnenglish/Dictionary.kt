@@ -76,7 +76,9 @@ class Dictionary(private val context: Context) {
             }
             word.endsWith("ing") && word.length > 5 -> {
                 val stem = word.dropLast(3)
-                if (stem.length > 2 && stem.last() == stem[stem.lastIndex - 1]) candidates += stem.dropLast(1)
+                if (stem.length > 2 && stem.last() == stem[stem.lastIndex - 1] && stem.last() in doubledInflectionConsonants) {
+                    candidates += stem.dropLast(1)
+                }
                 candidates += stem
                 candidates += stem + "e"
                 "\u73b0\u5728\u5206\u8bcd\u6216\u52a8\u540d\u8bcd"
@@ -87,7 +89,9 @@ class Dictionary(private val context: Context) {
             }
             word.endsWith("ed") && word.length > 4 -> {
                 val stem = word.dropLast(2)
-                if (stem.length > 2 && stem.last() == stem[stem.lastIndex - 1]) candidates += stem.dropLast(1)
+                if (stem.length > 2 && stem.last() == stem[stem.lastIndex - 1] && stem.last() in doubledInflectionConsonants) {
+                    candidates += stem.dropLast(1)
+                }
                 candidates += stem
                 candidates += word.dropLast(1)
                 "\u8fc7\u53bb\u5f0f\u6216\u8fc7\u53bb\u5206\u8bcd"
@@ -128,6 +132,8 @@ class Dictionary(private val context: Context) {
         "news", "series", "species", "physics", "mathematics", "this", "his", "is", "was"
     )
 
+
+    private val doubledInflectionConsonants = setOf('b', 'd', 'g', 'm', 'n', 'p', 'r', 't')
     private val irregularForms = mapOf(
         "am" to ("be" to "\u7b2c\u4e00\u4eba\u79f0\u5355\u6570"),
         "is" to ("be" to "\u7b2c\u4e09\u4eba\u79f0\u5355\u6570"),

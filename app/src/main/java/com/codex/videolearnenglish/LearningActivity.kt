@@ -93,7 +93,7 @@ class LearningActivity : Activity() {
     private var selectedIndex = -1
     private var displayMode = DisplayMode.ENGLISH
     private var showCurrentTranslation = false
-    private var loopSentence = true
+    private var loopSentence = false
     private var normalPlayback = false
     private var subtitleOffsetMs = 0
     private var textToSpeech: TextToSpeech? = null
@@ -147,8 +147,8 @@ class LearningActivity : Activity() {
     private val legacyEmulatorServiceUrl = "http://10.0.2.2:8765/transcribe?video=backpacking"
     private val subtitleCacheDirName = "subtitles_cache"
     private val wordbookFileName = "wordbook_history.json"
-    private val sentenceEndTrimMs = 250
-    private val nextSentenceGuardMs = 80
+    private val sentenceTailGraceMs = 160
+    private val nextSentenceGuardMs = 60
     private val seekBarProgressMax = 1000
     private val progressWatcher = object : Runnable {
         override fun run() {
@@ -158,7 +158,7 @@ class LearningActivity : Activity() {
                 if (pauseAtVideoTrackEndIfNeeded(currentMs)) {
                     updatePlaybackSeekBar()
                     updateButtons()
-                    handler.postDelayed(this, 120)
+                    handler.postDelayed(this, 50)
                     return
                 }
                 val index = currentSubtitleIndex(currentMs)
@@ -184,7 +184,7 @@ class LearningActivity : Activity() {
             }
             updatePlaybackSeekBar()
             updateButtons()
-            handler.postDelayed(this, 120)
+            handler.postDelayed(this, 50)
         }
     }
     private var captionReceiverRegistered = false
@@ -192,20 +192,14 @@ class LearningActivity : Activity() {
         override fun onReceive(context: android.content.Context?, intent: Intent?) {
             when (intent?.action) {
                 CaptionGenerationService.ACTION_PROGRESS -> {
-                    if (currentTab == MainTab.LEARNING && ::statusText.isInitialized) {
-                        statusText.text = intent.getStringExtra(CaptionGenerationService.EXTRA_MESSAGE).orEmpty()
-                    }
                     renderCurrentTaskTabThrottled()
                 }
                 CaptionGenerationService.ACTION_DONE -> {
                     val uriText = intent.getStringExtra(CaptionGenerationService.EXTRA_VIDEO_URI)
                     val count = intent.getIntExtra(CaptionGenerationService.EXTRA_COUNT, 0)
-                    if (uriText == currentVideoUri?.toString()) {
-                        val message = currentVideoUri?.let { loadCachedSubtitles(it) }
-                        statusText.text = message ?: "字幕已生成并缓存 $count 条。"
-                    } else {
-                        statusText.text = "字幕已在后台生成完成，重新导入对应视频会自动加载。"
-                    }
+                    if (uriText == currentVideoUri?.toString()) currentVideoUri?.let { loadCachedSubtitles(it) }
+                    Toast.makeText(this@LearningActivity, "后台字幕已完成：$count 句", Toast.LENGTH_SHORT).show()
+
                     renderCurrentTaskTab()
                 }
                 CaptionGenerationService.ACTION_TRANSLATION_DONE -> {
@@ -213,12 +207,9 @@ class LearningActivity : Activity() {
                     val uriText = intent.getStringExtra(CaptionGenerationService.EXTRA_VIDEO_URI)
                     val count = intent.getIntExtra(CaptionGenerationService.EXTRA_COUNT, 0)
                     val source = intent.getStringExtra(CaptionGenerationService.EXTRA_MESSAGE).orEmpty()
-                    if (uriText == currentVideoUri?.toString()) {
-                        currentVideoUri?.let { loadCachedSubtitles(it) }
-                        statusText.text = "已用${source}完成 $count 句中文翻译，并缓存到本机。"
-                    } else {
-                        statusText.text = "后台翻译已完成，重新导入对应视频会自动加载。"
-                    }
+                    if (uriText == currentVideoUri?.toString()) currentVideoUri?.let { loadCachedSubtitles(it) }
+                    Toast.makeText(this@LearningActivity, "${source}翻译已完成：$count 句", Toast.LENGTH_SHORT).show()
+
                     renderCurrentTaskTab()
                 }
                 CaptionGenerationService.ACTION_ERROR -> {
@@ -233,7 +224,6 @@ class LearningActivity : Activity() {
                     } else {
                         "后台任务失败"
                     }
-                    statusText.text = "$label：$message"
                     Toast.makeText(this@LearningActivity, "$label：$message", Toast.LENGTH_LONG).show()
                     renderCurrentTaskTab()
                 }
@@ -529,7 +519,7 @@ class LearningActivity : Activity() {
                 true
             }
         }
-        loopButton = controlButton("Loop On") {
+        loopButton = controlButton("单次") {
             loopSentence = !loopSentence
             updateButtons()
         }
@@ -2321,7 +2311,7 @@ class LearningActivity : Activity() {
             return
         }
         requestNotificationPermissionIfNeeded()
-        statusText.text = "已开始后台识别并翻译。可以锁屏或切到其他软件，任务会在通知栏持续运行；旧字幕会在新双语字幕完成后替换。"
+        Toast.makeText(this, "已加入后台字幕任务，可在“生成字幕中”查看进度。", Toast.LENGTH_SHORT).show()
         val intent = Intent(this, CaptionGenerationService::class.java)
             .putExtra(CaptionGenerationService.EXTRA_VIDEO_URI, uri.toString())
             .putExtra(CaptionGenerationService.EXTRA_VIDEO_TITLE, displayName(uri))
@@ -2349,7 +2339,7 @@ class LearningActivity : Activity() {
         requestNotificationPermissionIfNeeded()
         translationInProgress = true
         val label = if (taskKind == CaptionGenerationService.TASK_TRANSLATE_REMOTE) "电脑端" else "手机端"
-        statusText.text = "已开始后台${label}翻译。完成后会自动更新本地字幕。"
+        Toast.makeText(this, "已加入后台${label}翻译，可在“生成字幕中”查看进度。", Toast.LENGTH_SHORT).show()
         val intent = Intent(this, CaptionGenerationService::class.java)
             .putExtra(CaptionGenerationService.EXTRA_VIDEO_URI, uri.toString())
             .putExtra(CaptionGenerationService.EXTRA_VIDEO_TITLE, displayName(uri))
@@ -3554,11 +3544,11 @@ class LearningActivity : Activity() {
     private fun playbackEndMs(index: Int, line: SubtitleLine): Int {
         val start = startMs(line)
         val displayedEnd = endMs(line)
-        val trimmedEnd = displayedEnd - sentenceEndTrimMs
+        val naturalEnd = displayedEnd + sentenceTailGraceMs
         val nextStartCap = subtitles.getOrNull(index + 1)?.let { startMs(it) - nextSentenceGuardMs }
-        val cappedEnd = listOfNotNull(trimmedEnd, nextStartCap).minOrNull() ?: trimmedEnd
-        val minimumEnd = (start + 300).coerceAtMost(displayedEnd)
-        return cappedEnd.coerceIn(minimumEnd, displayedEnd)
+        val hardCap = nextStartCap?.coerceAtLeast(start + 1) ?: naturalEnd
+        val cappedEnd = minOf(naturalEnd, hardCap)
+        return cappedEnd.coerceAtLeast(start + 1)
     }
 
     private fun formatMs(ms: Int): String {

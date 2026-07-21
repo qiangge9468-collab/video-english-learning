@@ -290,7 +290,11 @@ object CaptionTaskStore {
                 stage = stage,
                 progress = progress.coerceIn(0, 100),
                 message = message,
-                connectionLabel = connectionLabel.ifBlank { it.connectionLabel },
+                connectionLabel = if (stage == "等待连接电脑") {
+                    ""
+                } else {
+                    connectionLabel.ifBlank { it.connectionLabel }
+                },
                 remoteUpdatedAt = System.currentTimeMillis(),
                 updatedAt = System.currentTimeMillis(),
                 error = null
@@ -305,6 +309,7 @@ object CaptionTaskStore {
                 status = CaptionTaskStatus.QUEUED,
                 stage = "等待连接电脑",
                 message = message,
+                connectionLabel = "",
                 updatedAt = System.currentTimeMillis(),
                 error = null
             )

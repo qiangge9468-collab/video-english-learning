@@ -428,7 +428,7 @@ class CaptionGenerationService : Service() {
                     fallback
                 )
                 Thread.sleep(retryDelayMs)
-                retryDelayMs = (retryDelayMs * 2).coerceAtMost(60_000L)
+                retryDelayMs = (retryDelayMs * 2).coerceAtMost(10_000L)
             }
         }
     }
@@ -911,7 +911,7 @@ class CaptionGenerationService : Service() {
                     serviceUrl
                 )
                 Thread.sleep(retryDelayMs)
-                retryDelayMs = (retryDelayMs * 2).coerceAtMost(60_000L)
+                retryDelayMs = (retryDelayMs * 2).coerceAtMost(10_000L)
                 continue
             }
             retryDelayMs = 2_000L

@@ -415,16 +415,20 @@ $adbJob = $null
 if ($adb) {
     $adbJob = Start-Job -ArgumentList $adb, $Port -ScriptBlock {
         param($AdbExe, $ListenPort)
-        $configured = @{}
         while ($true) {
             try {
                 $devices = & $AdbExe devices | Select-Object -Skip 1 | Where-Object { $_ -match "`tdevice$" }
                 foreach ($device in $devices) {
                     $serial = ($device -split "`t")[0]
-                    if (-not $configured.ContainsKey($serial)) {
+                    $reverseList = (& $AdbExe -s $serial reverse --list 2>$null) -join "`n"
+                    $mappingPattern = "tcp:8765\s+tcp:$ListenPort"
+                    if ($reverseList -notmatch $mappingPattern) {
                         & $AdbExe -s $serial reverse tcp:8765 tcp:$ListenPort | Out-Null
-                        $configured[$serial] = $true
-                        Write-Output "USB ready for ${serial}: phone 8765 -> computer $ListenPort"
+                        if ($LASTEXITCODE -eq 0) {
+                            Write-Output "USB ready for ${serial}: phone 8765 -> computer $ListenPort"
+                        } else {
+                            Write-Output "USB reverse failed for ${serial}; will retry in 5 seconds"
+                        }
                     }
                 }
             } catch {

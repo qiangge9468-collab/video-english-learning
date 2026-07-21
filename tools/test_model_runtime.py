@@ -291,6 +291,41 @@ class ModelRuntimeTests(unittest.TestCase):
         self.assertIn("longArrayOf(0L, 500_000L, 1_000_000L, 2_000_000L)", activity_source)
         self.assertIn("video_thumbnails_v2", activity_source)
 
+    def test_learning_ui_and_connection_recovery_guards(self):
+        root = SERVICE_PATH.parent.parent
+        activity_source = (
+            root / "app" / "src" / "main" / "java" / "com" / "codex" /
+            "videolearnenglish" / "LearningActivity.kt"
+        ).read_text(encoding="utf-8")
+        dictionary_source = (
+            root / "app" / "src" / "main" / "java" / "com" / "codex" /
+            "videolearnenglish" / "Dictionary.kt"
+        ).read_text(encoding="utf-8")
+        task_store_source = (
+            root / "app" / "src" / "main" / "java" / "com" / "codex" /
+            "videolearnenglish" / "CaptionTaskStore.kt"
+        ).read_text(encoding="utf-8")
+        launcher_source = (root / "tools" / "start_video_english_service_v2.0.2.ps1").read_text(encoding="utf-8")
+        self.assertIn("private var loopSentence = false", activity_source)
+        self.assertIn("private val sentenceTailGraceMs = 160", activity_source)
+        self.assertIn("startMs(it) - nextSentenceGuardMs", activity_source)
+        self.assertNotIn("sentenceEndTrimMs", activity_source)
+        self.assertIn("val hardCap = nextStartCap?.coerceAtLeast(start + 1)", activity_source)
+        progress_block = activity_source.split("CaptionGenerationService.ACTION_PROGRESS ->", 1)[1].split(
+            "CaptionGenerationService.ACTION_DONE ->", 1
+        )[0]
+        self.assertNotIn("statusText.text", progress_block)
+        self.assertIn("doubledInflectionConsonants", dictionary_source)
+        consonants = dictionary_source.split("doubledInflectionConsonants =", 1)[1].split("\n", 1)[0]
+        self.assertNotIn("'l'", consonants)
+        self.assertIn('stage == "等待连接电脑"', task_store_source)
+        self.assertIn('connectionLabel = if', task_store_source)
+        self.assertIn('connectionLabel = ""', task_store_source)
+        self.assertIn('reverse --list', launcher_source)
+        self.assertNotIn('$configured.ContainsKey', launcher_source)
+        self.assertIn('coerceAtMost(10_000L)', SERVICE_PATH.parent.parent.joinpath(
+            "app", "src", "main", "java", "com", "codex", "videolearnenglish", "CaptionGenerationService.kt"
+        ).read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":
