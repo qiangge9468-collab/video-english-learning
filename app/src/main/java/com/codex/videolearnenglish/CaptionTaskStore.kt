@@ -37,7 +37,15 @@ data class CaptionTask(
     val createdAt: Long,
     val updatedAt: Long,
     val completedAt: Long,
-    val error: String?
+    val error: String?,
+    val audioHash: String,
+    val uploadId: String,
+    val uploadedBytes: Long,
+    val totalBytes: Long,
+    val uploadPrepared: Boolean,
+    val remoteJobId: String,
+    val remoteUpdatedAt: Long,
+    val forceTranscribe: Boolean
 )
 
 object CaptionTaskStore {
@@ -50,12 +58,22 @@ object CaptionTaskStore {
     fun all(context: Context): List<CaptionTask> = read(context)
 
     @Synchronized
-    fun enqueue(context: Context, uri: Uri, title: String, taskKind: String = TASK_GENERATE, resetFailures: Boolean = true): CaptionTask {
+    fun enqueue(
+        context: Context,
+        uri: Uri,
+        title: String,
+        taskKind: String = TASK_GENERATE,
+        resetFailures: Boolean = true,
+        forceTranscribe: Boolean? = null
+    ): CaptionTask {
         val now = System.currentTimeMillis()
         val id = stableId(uri.toString())
         val tasks = read(context).toMutableList()
         val existingIndex = tasks.indexOfFirst { it.id == id }
         val existing = tasks.getOrNull(existingIndex)
+        val forceRegeneration = taskKind == TASK_GENERATE && (
+            forceTranscribe ?: (existing?.forceTranscribe == true || existing?.status == CaptionTaskStatus.DONE)
+        )
         val task = CaptionTask(
             id = id,
             uri = uri.toString(),
@@ -72,7 +90,15 @@ object CaptionTaskStore {
             createdAt = existing?.createdAt ?: now,
             updatedAt = now,
             completedAt = 0L,
-            error = null
+            error = null,
+            audioHash = existing?.audioHash.orEmpty(),
+            uploadId = existing?.uploadId.orEmpty(),
+            uploadedBytes = existing?.uploadedBytes ?: 0L,
+            totalBytes = existing?.totalBytes ?: 0L,
+            uploadPrepared = false,
+            remoteJobId = "",
+            remoteUpdatedAt = existing?.remoteUpdatedAt ?: 0L,
+            forceTranscribe = forceRegeneration
         )
         if (existingIndex >= 0) tasks[existingIndex] = task else tasks.add(0, task)
         write(context, tasks)
@@ -96,15 +122,24 @@ object CaptionTaskStore {
 
     @Synchronized
     fun updateProgress(context: Context, id: String, message: String) {
-        update(context, id) {
-            it.copy(
-                status = CaptionTaskStatus.RUNNING,
-                stage = stageFromMessage(message),
-                message = message,
-                progress = percentFromMessage(message) ?: it.progress,
-                connectionLabel = connectionFromMessage(message).ifBlank { it.connectionLabel },
-                updatedAt = System.currentTimeMillis()
-            )
+        update(context, id) { task ->
+            val connection = connectionFromMessage(message)
+            if (isConnectionOnlyMessage(message)) {
+                task.copy(
+                    status = CaptionTaskStatus.RUNNING,
+                    connectionLabel = connection.ifBlank { task.connectionLabel },
+                    updatedAt = System.currentTimeMillis()
+                )
+            } else {
+                task.copy(
+                    status = CaptionTaskStatus.RUNNING,
+                    stage = stageFromMessage(message),
+                    message = stableDisplayMessage(message),
+                    progress = percentFromMessage(message) ?: task.progress,
+                    connectionLabel = connection.ifBlank { task.connectionLabel },
+                    updatedAt = System.currentTimeMillis()
+                )
+            }
         }
     }
 
@@ -174,6 +209,121 @@ object CaptionTaskStore {
     }
 
     @Synchronized
+    fun recordUpload(
+        context: Context,
+        id: String,
+        audioHash: String,
+        uploadId: String,
+        uploadedBytes: Long,
+        totalBytes: Long
+    ) {
+        update(context, id) {
+            it.copy(
+                audioHash = audioHash.ifBlank { it.audioHash },
+                uploadId = uploadId.ifBlank { it.uploadId },
+                uploadedBytes = uploadedBytes.coerceAtLeast(0L),
+                totalBytes = totalBytes.coerceAtLeast(0L),
+                remoteUpdatedAt = System.currentTimeMillis(),
+                updatedAt = System.currentTimeMillis()
+            )
+        }
+    }
+
+    @Synchronized
+    fun markUploadPrepared(context: Context, id: String, connectionLabel: String) {
+        update(context, id) {
+            it.copy(
+                status = CaptionTaskStatus.QUEUED,
+                stage = "音频已上传",
+                progress = 30,
+                message = "音频已完整保存到电脑，等待同批音频全部上传后提交处理。",
+                connectionLabel = connectionLabel.ifBlank { it.connectionLabel },
+                uploadPrepared = true,
+                remoteUpdatedAt = System.currentTimeMillis(),
+                updatedAt = System.currentTimeMillis(),
+                error = null
+            )
+        }
+    }
+
+    @Synchronized
+    fun markSubmitted(context: Context, id: String, jobId: String, connectionLabel: String) {
+        update(context, id) {
+            it.copy(
+                status = CaptionTaskStatus.QUEUED,
+                stage = "电脑队列等待",
+                progress = it.progress.coerceAtLeast(30),
+                message = "已提交电脑端 FIFO 队列；手机断网不影响电脑继续处理。",
+                connectionLabel = connectionLabel.ifBlank { it.connectionLabel },
+                remoteJobId = jobId,
+                remoteUpdatedAt = System.currentTimeMillis(),
+                updatedAt = System.currentTimeMillis(),
+                error = null
+            )
+        }
+    }
+
+    @Synchronized
+    fun recordRemoteJob(context: Context, id: String, jobId: String) {
+        update(context, id) {
+            it.copy(
+                remoteJobId = jobId,
+                remoteUpdatedAt = System.currentTimeMillis(),
+                updatedAt = System.currentTimeMillis(),
+                error = null
+            )
+        }
+    }
+
+    @Synchronized
+    fun updateRemoteProgress(
+        context: Context,
+        id: String,
+        stage: String,
+        progress: Int,
+        message: String,
+        connectionLabel: String = ""
+    ) {
+        update(context, id) {
+            it.copy(
+                status = CaptionTaskStatus.RUNNING,
+                stage = stage,
+                progress = progress.coerceIn(0, 100),
+                message = message,
+                connectionLabel = if (stage == "等待连接电脑") {
+                    ""
+                } else {
+                    connectionLabel.ifBlank { it.connectionLabel }
+                },
+                remoteUpdatedAt = System.currentTimeMillis(),
+                updatedAt = System.currentTimeMillis(),
+                error = null
+            )
+        }
+    }
+
+    @Synchronized
+    fun markWaitingForComputer(context: Context, id: String, message: String) {
+        update(context, id) {
+            it.copy(
+                status = CaptionTaskStatus.QUEUED,
+                stage = "等待连接电脑",
+                message = message,
+                connectionLabel = "",
+                updatedAt = System.currentTimeMillis(),
+                error = null
+            )
+        }
+    }
+
+    @Synchronized
+    fun clearRemoteJob(context: Context, id: String) {
+        update(context, id) {
+            it.copy(remoteJobId = "", remoteUpdatedAt = 0L, updatedAt = System.currentTimeMillis())
+        }
+    }
+
+    @Synchronized
     fun cancel(context: Context, id: String) {
         update(context, id) {
             it.copy(
@@ -218,8 +368,35 @@ object CaptionTaskStore {
     }
 
     @Synchronized
-    fun queued(context: Context): CaptionTask? =
-        read(context).firstOrNull { it.status == CaptionTaskStatus.QUEUED }
+    fun queued(context: Context): CaptionTask? {
+        val queued = read(context)
+            .filter { it.status == CaptionTaskStatus.QUEUED }
+            .sortedBy { it.createdAt }
+        return queued.firstOrNull { !it.uploadPrepared && it.remoteJobId.isBlank() }
+            ?: queued.firstOrNull { it.uploadPrepared && it.remoteJobId.isBlank() }
+            ?: queued.firstOrNull { it.remoteJobId.isNotBlank() }
+    }
+    @Synchronized
+    fun hasPendingUpload(context: Context, excludingTaskId: String = ""): Boolean =
+        read(context).any {
+            it.id != excludingTaskId &&
+                it.status == CaptionTaskStatus.QUEUED &&
+                it.remoteJobId.isBlank()
+        }
+
+
+    @Synchronized
+    fun recoverable(context: Context): CaptionTask? =
+        read(context).let { tasks ->
+            tasks.firstOrNull { it.status == CaptionTaskStatus.RUNNING }
+                ?: tasks.filter { it.status == CaptionTaskStatus.QUEUED }
+                    .sortedBy { it.createdAt }
+                    .let { queued ->
+                        queued.firstOrNull { !it.uploadPrepared && it.remoteJobId.isBlank() }
+                            ?: queued.firstOrNull { it.uploadPrepared && it.remoteJobId.isBlank() }
+                            ?: queued.firstOrNull { it.remoteJobId.isNotBlank() }
+                    }
+        }
 
     fun stableId(uri: String): String {
         val digest = MessageDigest.getInstance("SHA-256").digest(uri.toByteArray(Charsets.UTF_8))
@@ -257,7 +434,15 @@ object CaptionTaskStore {
                     createdAt = item.optLong("createdAt", 0L),
                     updatedAt = item.optLong("updatedAt", 0L),
                     completedAt = item.optLong("completedAt", 0L),
-                    error = item.optString("error").takeIf { value -> value.isNotBlank() && value != "null" }
+                    error = item.optString("error").takeIf { value -> value.isNotBlank() && value != "null" },
+                    audioHash = item.optString("audioHash"),
+                    uploadId = item.optString("uploadId"),
+                    uploadedBytes = item.optLong("uploadedBytes", 0L).coerceAtLeast(0L),
+                    totalBytes = item.optLong("totalBytes", 0L).coerceAtLeast(0L),
+                    uploadPrepared = item.optBoolean("uploadPrepared", false),
+                    remoteJobId = item.optString("remoteJobId"),
+                    remoteUpdatedAt = item.optLong("remoteUpdatedAt", 0L),
+                    forceTranscribe = item.optBoolean("forceTranscribe", false)
                 )
             }
         }.getOrDefault(emptyList())
@@ -283,6 +468,14 @@ object CaptionTaskStore {
                 put("updatedAt", task.updatedAt)
                 put("completedAt", task.completedAt)
                 put("error", task.error ?: JSONObject.NULL)
+                put("audioHash", task.audioHash)
+                put("uploadId", task.uploadId)
+                put("uploadedBytes", task.uploadedBytes)
+                put("totalBytes", task.totalBytes)
+                put("uploadPrepared", task.uploadPrepared)
+                put("remoteJobId", task.remoteJobId)
+                put("remoteUpdatedAt", task.remoteUpdatedAt)
+                put("forceTranscribe", task.forceTranscribe)
             })
         }
         storeFile(context).writeText(array.toString(), Charsets.UTF_8)
@@ -301,10 +494,32 @@ object CaptionTaskStore {
         Regex("""(\d+)\s*/\s*(\d+)""").find(message)?.let { match ->
             val current = match.groupValues[1].toIntOrNull() ?: return null
             val total = match.groupValues[2].toIntOrNull()?.takeIf { it > 0 } ?: return null
-            return (current * 100 / total).coerceIn(0, 100)
+            val fraction = current.toDouble() / total.toDouble()
+            return if (message.contains("翻译")) {
+                (92 + (fraction * 7).toInt()).coerceIn(92, 99)
+            } else {
+                (current * 100 / total).coerceIn(0, 100)
+            }
         }
         return null
     }
+
+    private fun isConnectionOnlyMessage(message: String): Boolean =
+        message.startsWith("已选择 Whisper 服务") ||
+            message.startsWith("检测到更稳定的连接") ||
+            message.startsWith("轮询连接中断") ||
+            message.startsWith("上传连接中断")
+
+    private fun stableDisplayMessage(message: String): String =
+        when {
+            message.startsWith("正在生成字幕") && message.contains("Translating subtitles") -> {
+                val batch = Regex("""(\d+)\s*/\s*(\d+)""").find(message)?.value.orEmpty()
+                if (batch.isNotBlank()) "正在翻译字幕：$batch" else "正在翻译字幕"
+            }
+            message.startsWith("正在生成字幕") && message.contains("Translating English subtitles") -> "正在准备翻译英文字幕"
+            message.contains("翻译模型已加载") -> message.replace("翻译模型已加载，", "")
+            else -> message
+        }
 
     private fun connectionFromMessage(message: String): String {
         return when {

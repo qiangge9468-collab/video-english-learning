@@ -25,6 +25,16 @@ local.properties
 __pycache__/
 *.pyc
 tools/runtime_service_config.json
+tools/runtime_status.json
+tools/latest_service_urls.txt
+service_data/
+tools/runtime_service_config_v2.*.json
+tools/runtime_status_v2.*.json
+tools/latest_service_urls_v2.*.txt
+tools/service_*.log
+tools/ui-*.xml
+tools/service_*.pid
+service_data_v2.*/
 
 # On-device Whisper models are too large for Git.
 models/
