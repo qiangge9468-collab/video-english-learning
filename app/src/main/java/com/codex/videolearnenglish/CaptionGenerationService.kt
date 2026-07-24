@@ -326,7 +326,7 @@ class CaptionGenerationService : Service() {
     }
 
     private fun selectReachableServiceUrl(candidates: List<String>): String {
-        val expanded = linkedSetOf<String>().apply { addAll(candidates.filter { it.isNotBlank() }) }
+        val expanded = refreshedServiceUrlCandidates(candidates)
         val errors = mutableListOf<String>()
         for (url in expanded.sortedWith(compareBy { serviceUrlPriority(it) })) {
             runCatching {
@@ -349,6 +349,34 @@ class CaptionGenerationService : Service() {
             }
         }
         error("所有 Whisper 地址都连接失败。${errors.takeLast(3).joinToString("；")}")
+    }
+
+    /**
+     * Background tasks can outlive a computer service process. The start script may then
+     * publish a new token/URL into preferences while this service thread is still running.
+     * Always put the latest saved URLs before the immutable Intent snapshot so reconnects
+     * do not keep retrying a stale token until the user pauses and resumes the task.
+     */
+    private fun refreshedServiceUrlCandidates(fallback: List<String>): LinkedHashSet<String> {
+        val ordered = linkedSetOf<String>()
+        val preferences = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+        preferences.getString(SERVICE_URL_KEY, null)
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
+            ?.let { ordered += it }
+        val saved = preferences.getString(SERVICE_URL_CANDIDATES_KEY, null).orEmpty()
+        runCatching {
+            val array = JSONArray(saved)
+            for (i in 0 until array.length()) {
+                val url = array.optString(i).trim()
+                if (url.isNotBlank()) ordered += url
+            }
+        }
+        ordered += fallback.map { it.trim() }.filter { it.isNotBlank() }
+        ordered += if (isRunningOnEmulator()) EMULATOR_SERVICE_URL else PHONE_USB_SERVICE_URL
+        return LinkedHashSet(
+            ordered.filterNot { !isRunningOnEmulator() && it.contains("10.0.2.2") }
+        )
     }
 
     private fun serviceUrlPriority(url: String): Int {
