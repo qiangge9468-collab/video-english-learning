@@ -89,6 +89,10 @@ MIN_GAP_SECONDS = 0.03
 TRANSLATION_BATCH_SIZE = int(os.environ.get("TRANSLATION_BATCH_SIZE", "16"))
 MAX_UPLOAD_MB = int(os.environ.get("WHISPER_MAX_UPLOAD_MB", "2048"))
 AUTH_TOKEN = os.environ.get("WHISPER_AUTH_TOKEN", "").strip()
+PIPELINE_REVISION = "v2.0.4-caption-quality-fix-1"
+SPEECH_GAP_MIN_SECONDS = float(os.environ.get("WHISPER_SPEECH_GAP_MIN_SECONDS", "2.0"))
+SPEECH_GAP_MAX_SECONDS = float(os.environ.get("WHISPER_SPEECH_GAP_MAX_SECONDS", "18.0"))
+SPEECH_GAP_PAD_SECONDS = float(os.environ.get("WHISPER_SPEECH_GAP_PAD_SECONDS", "0.75"))
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SERVICE_VERSION = "2.0.4"
 SEGMENTER_VERSION = "semantic-dp-v1"
@@ -118,7 +122,7 @@ WHISPER_HOTWORDS = os.environ.get(
 ).strip()
 WHISPER_INITIAL_PROMPT = os.environ.get(
     "WHISPER_INITIAL_PROMPT",
-    "Clear English travel, hiking, backpacking, motorcycle and route-planning captions.",
+    "Clear English captions.",
 ).strip()
 WHISPER_FORCE_LANGUAGE = os.environ.get("WHISPER_FORCE_LANGUAGE", "en").strip().lower()
 OUTDOOR_HOTWORDS = (
@@ -500,19 +504,43 @@ def decode_video_title(value):
         return str(value or "").strip()[:300]
 
 
+TITLE_HOTWORD_STOPWORDS = {
+    "about", "along", "english", "follow", "from", "full", "highest", "minutes",
+    "part", "practice", "the", "this", "through", "tutorial", "video", "with",
+    "world", "your", "how", "into", "what", "when", "where", "why",
+}
+
+
+def extract_title_hotwords(video_title=""):
+    title = re.sub(r"[_\s]+", " ", str(video_title or "")).strip()
+    title = re.sub(r"\.(mp4|m4a|mov|mkv|webm)$", "", title, flags=re.IGNORECASE)
+    result = []
+    seen = set()
+    for token in re.findall(r"[A-Za-z][A-Za-z0-9'?-]{2,}", title):
+        key = token.lower()
+        if key in TITLE_HOTWORD_STOPWORDS or key in seen:
+            continue
+        seen.add(key)
+        result.append(token)
+        if len(result) >= 12:
+            break
+    return result
+
+
 def build_transcription_context(video_title=""):
     title = re.sub(r"[_\s]+", " ", str(video_title or "")).strip()
     title = re.sub(r"\.(mp4|m4a|mov|mkv|webm)$", "", title, flags=re.IGNORECASE)
     prompt_parts = [WHISPER_INITIAL_PROMPT] if WHISPER_INITIAL_PROMPT else []
     hotword_parts = [WHISPER_HOTWORDS] if WHISPER_HOTWORDS else []
-    if title:
-        prompt_parts.append(f"The video title is: {title}.")
-        hotword_parts.append(title)
-    if re.search(
+    title_hotwords = extract_title_hotwords(title)
+    if title_hotwords:
+        hotword_parts.append(", ".join(title_hotwords))
+    is_outdoor = bool(re.search(
         r"\b(hik|backpack|camp|trail|mountain|outdoor|gear|trek|switzerland|pakistan)\w*\b",
         title,
         flags=re.IGNORECASE,
-    ):
+    ))
+    if is_outdoor:
         prompt_parts.append("Use accurate outdoor, hiking, camping and ultralight gear terminology.")
         hotword_parts.append(OUTDOOR_HOTWORDS)
     prompt = " ".join(part for part in prompt_parts if part).strip()
@@ -622,7 +650,7 @@ def submit_durable_job(upload, mode="generate", force=False, video_title="", seg
         active["reused"] = True
         return active
     if mode == "generate" and not force:
-        cached = JOB_STORE.load_bilingual(audio_hash)
+        cached = JOB_STORE.load_bilingual(audio_hash) if cache_revision_is_current(audio_hash) else None
         if isinstance(cached, list) and cached:
             job = JOB_STORE.create_job(audio_hash, upload.get("audio_path", ""), video_title, mode, force)
             JOB_STORE.finish_job(job["job_id"], cached)
@@ -768,6 +796,7 @@ def run_job(job_id):
                     artifact_audio_hash=audio_hash,
                 )
             JOB_STORE.save_bilingual(audio_hash, result)
+            save_pipeline_revision(audio_hash)
             JOB_STORE.finish_job(job_id, result)
             print(f"[job {job_id}] done segments={len(result)}", flush=True)
             write_runtime_status(
@@ -951,6 +980,193 @@ def save_artifact(audio_hash, name, value):
         JOB_STORE.save_artifact(audio_hash, name, value)
 
 
+def normalize_prompt_echo_text(text):
+    return " ".join(re.findall(r"[a-z0-9]+", str(text or "").lower()))
+
+
+def looks_like_prompt_echo(text, video_title):
+    candidate = normalize_prompt_echo_text(text)
+    title = normalize_prompt_echo_text(re.sub(r"\.(mp4|m4a|mov|mkv|webm)$", "", str(video_title or ""), flags=re.IGNORECASE))
+    if not candidate or not title:
+        return False
+    return candidate == title or (title in candidate and len(candidate) <= len(title) + 24)
+
+
+def find_uncovered_speech_gaps(raw_words, speech_ranges):
+    words = sorted(raw_words, key=lambda item: (float(item["start"]), float(item["end"])))
+    gaps = []
+    for previous, following in zip(words, words[1:]):
+        start = float(previous["end"])
+        end = float(following["start"])
+        duration = end - start
+        if duration < SPEECH_GAP_MIN_SECONDS:
+            continue
+        speech_overlap = sum(max(0.0, min(end, speech_end) - max(start, speech_start)) for speech_start, speech_end in speech_ranges)
+        if speech_overlap < min(duration * 0.55, SPEECH_GAP_MIN_SECONDS):
+            continue
+        cursor = start
+        while end - cursor > SPEECH_GAP_MAX_SECONDS:
+            gaps.append((cursor, cursor + SPEECH_GAP_MAX_SECONDS))
+            cursor += SPEECH_GAP_MAX_SECONDS - 1.0
+        if end - cursor >= SPEECH_GAP_MIN_SECONDS:
+            gaps.append((cursor, end))
+    return gaps
+
+
+def rebuild_raw_transcription_artifacts(raw_segments, raw_words):
+    words = []
+    for item in sorted(raw_words, key=lambda value: (float(value["start"]), float(value["end"]))):
+        normalized = " ".join(str(item.get("text", "")).split())
+        if not normalized:
+            continue
+        if words:
+            previous = words[-1]
+            same_word = normalize_prompt_echo_text(previous.get("text")) == normalize_prompt_echo_text(normalized)
+            overlaps = float(item["start"]) < float(previous["end"]) - 0.08
+            if same_word and overlaps:
+                continue
+        clean = dict(item)
+        clean["text"] = normalized
+        clean["index"] = len(words)
+        words.append(clean)
+
+    segments = sorted(raw_segments, key=lambda value: (float(value["start"]), float(value["end"])))
+    for segment_id, segment in enumerate(segments):
+        segment["id"] = segment_id
+        member_indexes = [
+            index for index, word in enumerate(words)
+            if float(segment["start"]) - 0.05 <= (float(word["start"]) + float(word["end"])) / 2 <= float(segment["end"]) + 0.05
+        ]
+        segment["word_start"] = member_indexes[0] if member_indexes else 0
+        segment["word_end"] = member_indexes[-1] + 1 if member_indexes else 0
+        for index in member_indexes:
+            words[index]["segment_id"] = segment_id
+    return segments, words
+
+
+def recover_uncovered_speech(model, video_path, raw_segments, raw_words, language, video_title, progress=None):
+    debug = {"candidates": [], "recovered": [], "error": ""}
+    if len(raw_words) < 2:
+        return raw_segments, raw_words, debug
+    try:
+        from faster_whisper.audio import decode_audio
+        from faster_whisper.vad import VadOptions, get_speech_timestamps
+
+        audio = decode_audio(video_path, sampling_rate=16000)
+        vad_options = VadOptions(min_silence_duration_ms=400, speech_pad_ms=150)
+        speech_chunks = get_speech_timestamps(audio, vad_options)
+        speech_ranges = [(item["start"] / 16000.0, item["end"] / 16000.0) for item in speech_chunks]
+        gaps = find_uncovered_speech_gaps(raw_words, speech_ranges)
+        debug["candidates"] = [{"start": start, "end": end} for start, end in gaps]
+        if not gaps:
+            return raw_segments, raw_words, debug
+
+        recovery_hotwords = ", ".join(extract_title_hotwords(video_title)) or None
+        recovered_words = []
+        recovered_segments = []
+        for gap_index, (gap_start, gap_end) in enumerate(gaps, start=1):
+            report(progress, "postprocessing", 87, f"Checking speech gap {gap_index}/{len(gaps)} at {format_seconds(gap_start)}")
+            clip_start = max(0.0, gap_start - SPEECH_GAP_PAD_SECONDS)
+            clip_end = min(len(audio) / 16000.0, gap_end + SPEECH_GAP_PAD_SECONDS)
+            clip = audio[int(clip_start * 16000):int(clip_end * 16000)]
+            local_segments, _info = model.transcribe(
+                clip,
+                language=language if language else None,
+                beam_size=5,
+                patience=1.2,
+                vad_filter=True,
+                vad_parameters={"min_silence_duration_ms": 250, "speech_pad_ms": 200},
+                word_timestamps=True,
+                condition_on_previous_text=False,
+                initial_prompt=None,
+                hotwords=recovery_hotwords,
+                temperature=0.0,
+                compression_ratio_threshold=1.35,
+                log_prob_threshold=-1.0,
+                no_speech_threshold=0.6,
+            )
+            for local_segment in local_segments:
+                text = " ".join(local_segment.text.strip().split())
+                avg_logprob_value = getattr(local_segment, "avg_logprob", None)
+                no_speech_value = getattr(local_segment, "no_speech_prob", None)
+                avg_logprob = float(avg_logprob_value) if avg_logprob_value is not None else -99.0
+                no_speech_prob = float(no_speech_value) if no_speech_value is not None else 1.0
+                local_words = list(getattr(local_segment, "words", None) or [])
+                probabilities = [float(word.probability) for word in local_words if getattr(word, "probability", None) is not None]
+                mean_probability = sum(probabilities) / len(probabilities) if probabilities else 0.0
+                if not text or looks_like_prompt_echo(text, video_title):
+                    continue
+                if avg_logprob < -0.8 or no_speech_prob > 0.55 or mean_probability < 0.30:
+                    continue
+                segment_words = []
+                for word in local_words:
+                    word_text = " ".join(word.word.strip().split())
+                    start = float(word.start) + clip_start
+                    end = float(word.end) + clip_start
+                    midpoint = (start + end) / 2.0
+                    if not word_text or midpoint <= gap_start + 0.02 or midpoint >= gap_end - 0.02:
+                        continue
+                    segment_words.append({
+                        "index": 0,
+                        "segment_id": -1,
+                        "start": start,
+                        "end": end,
+                        "text": word_text,
+                        "probability": float(word.probability) if getattr(word, "probability", None) is not None else None,
+                        "recovered": True,
+                    })
+                if not segment_words:
+                    continue
+                preserve_segment_terminal_punctuation(segment_words, 0, text)
+                recovered_words.extend(segment_words)
+                recovered_segments.append({
+                    "id": -1,
+                    "start": max(gap_start, float(local_segment.start) + clip_start),
+                    "end": min(gap_end, float(local_segment.end) + clip_start),
+                    "text": " ".join(item["text"] for item in segment_words),
+                    "avg_logprob": avg_logprob,
+                    "no_speech_prob": no_speech_prob,
+                    "compression_ratio": getattr(local_segment, "compression_ratio", None),
+                    "temperature": getattr(local_segment, "temperature", None),
+                    "word_start": 0,
+                    "word_end": 0,
+                    "translation": "",
+                    "recovered": True,
+                })
+                debug["recovered"].append({
+                    "start": recovered_segments[-1]["start"],
+                    "end": recovered_segments[-1]["end"],
+                    "text": recovered_segments[-1]["text"],
+                    "avg_logprob": avg_logprob,
+                    "mean_word_probability": mean_probability,
+                })
+        if recovered_words:
+            raw_segments = list(raw_segments) + recovered_segments
+            raw_words = list(raw_words) + recovered_words
+            raw_segments, raw_words = rebuild_raw_transcription_artifacts(raw_segments, raw_words)
+        remaining = find_uncovered_speech_gaps(raw_words, speech_ranges)
+        debug["remaining_candidates"] = [{"start": start, "end": end} for start, end in remaining]
+    except Exception as exc:
+        debug["error"] = f"{type(exc).__name__}: {exc}"
+        print(f"Speech-gap recovery failed; keeping the first-pass transcript: {exc}", flush=True)
+    return raw_segments, raw_words, debug
+
+
+def cache_revision_is_current(audio_hash):
+    if not audio_hash:
+        return False
+    metadata = JOB_STORE.load_artifact(audio_hash, "pipeline.json", {})
+    return isinstance(metadata, dict) and metadata.get("revision") == PIPELINE_REVISION
+
+
+def save_pipeline_revision(audio_hash):
+    save_artifact(
+        audio_hash,
+        "pipeline.json",
+        {"revision": PIPELINE_REVISION, "service_version": SERVICE_VERSION},
+    )
+
+
 def finalize_english_segments(segments):
     return add_sentence_timing_padding(correct_recognized_captions(segments))
 
@@ -1041,9 +1257,13 @@ def transcribe(
                     "translation": "",
                 }
             )
+    raw_segments, raw_words, gap_debug = recover_uncovered_speech(
+        model, video_path, raw_segments, raw_words, language, video_title, progress
+    )
     report(progress, "postprocessing", 88, "Post-processing subtitle timing")
     save_artifact(artifact_audio_hash, "whisper_segments.json", raw_segments)
     save_artifact(artifact_audio_hash, "whisper_words.json", raw_words)
+    save_artifact(artifact_audio_hash, "speech_gap_recovery.json", gap_debug)
 
     legacy = words_to_sentence_segments(raw_words) if raw_words else merge_sentence_segments(raw_segments)
     legacy = finalize_english_segments(legacy)
@@ -1053,6 +1273,8 @@ def transcribe(
     debug = {
         "algorithm": SEGMENTER_VERSION,
         "service_version": SERVICE_VERSION,
+        "pipeline_revision": PIPELINE_REVISION,
+        "speech_gap_recovery": gap_debug,
         "used_fallback": True,
     }
     if raw_words and semantic_segmenter_enabled():
@@ -1392,59 +1614,124 @@ def translate_segments(segments, language="en", progress=None):
     return translated
 
 
+NUMBER_WORD_VALUES = {
+    "zero": "0", "one": "1", "two": "2", "three": "3", "four": "4",
+    "five": "5", "six": "6", "seven": "7", "eight": "8", "nine": "9", "ten": "10",
+}
+
+
+def deterministic_caption_translation(text):
+    source = " ".join(str(text or "").split()).strip()
+    if not source:
+        return ""
+    if re.fullmatch(r"(?:https?://|www\.)\S+", source, flags=re.IGNORECASE):
+        return source
+    tokens = re.findall(r"[A-Za-z]+|\d+", source)
+    residue = re.sub(r"[A-Za-z]+|\d+|[\s,.;:!?\u3001\uff0c\u3002\uff1b\uff1a\uff01\uff1f-]", "", source)
+    if not tokens or residue:
+        return None
+    if not all(token.isdigit() or token.lower() in NUMBER_WORD_VALUES for token in tokens):
+        return None
+    values = [token if token.isdigit() else NUMBER_WORD_VALUES[token.lower()] for token in tokens]
+    terminal = "\u3002" if re.search(r"[.!?\u3002\uff01\uff1f]\s*$", source) else ""
+    return "\u3001".join(values) + terminal
+
+
+def translation_is_degenerate(source, translation):
+    source = " ".join(str(source or "").split())
+    text = " ".join(str(translation or "").split())
+    if not text:
+        return True
+    if len(text) > max(80, len(source) * 5 + 24):
+        return True
+    if re.search(r"([\u3400-\u9fffA-Za-z0-9])(?:[\s,\u3001\uff0c.\u3002;\uff1b:\uff1a!\uff01?\uff1f]*\1){5,}", text, flags=re.IGNORECASE):
+        return True
+    if re.search(r"(.{2,12})(?:[\s,\u3001\uff0c.\u3002;\uff1b:\uff1a!\uff01?\uff1f]+\1){4,}", text, flags=re.IGNORECASE):
+        return True
+    units = re.findall(r"[\u3400-\u9fff]|[A-Za-z0-9]+", text.lower())
+    if len(units) >= 16:
+        most_common = max(units.count(unit) for unit in set(units))
+        if most_common / len(units) >= 0.55:
+            return True
+    return False
+
+
+def safe_caption_translation(source, prepared, translation):
+    direct = deterministic_caption_translation(source)
+    if direct is not None:
+        return direct
+    polished = polish_caption_translation(source, prepared, translation)
+    if translation_is_degenerate(source, polished):
+        print(f"Rejected degenerate translation for: {source[:120]}", flush=True)
+        return " ".join(str(source or "").split())
+    return polished
+
+
 def translate_texts(texts, progress=None):
     if not texts or TRANSLATION_PROVIDER in ("", "none", "off"):
         return ["" for _ in texts]
+
+    prepared_texts = [prepare_caption_for_translation(text) for text in texts]
+    translated = [""] * len(texts)
+    pending_indexes = []
+    for index, text in enumerate(texts):
+        direct = deterministic_caption_translation(text)
+        if direct is None:
+            pending_indexes.append(index)
+        else:
+            translated[index] = direct
+    if not pending_indexes:
+        return translated
 
     try:
         translator = get_translator()
     except Exception as exc:
         raise RuntimeError(f"could not load translation model: {exc}") from exc
-
     if translator is None:
         raise RuntimeError("no local English-to-Chinese translator is available")
 
-    prepared_texts = [prepare_caption_for_translation(text) for text in texts]
     write_runtime_status(
         stage="translating",
         message=f"Translating {len(texts)} subtitles",
         translation_total=len(texts),
-        translation_done=0,
+        translation_done=len(texts) - len(pending_indexes),
         translation_model=display_model_name(TRANSLATION_MODEL),
         translation_provider=TRANSLATION_PROVIDER,
     )
-    print(f"Translating {len(texts)} subtitles with {TRANSLATION_PROVIDER}/{display_model_name(TRANSLATION_MODEL)}; batch size={TRANSLATION_BATCH_SIZE}", flush=True)
-    translated = [""] * len(texts)
+    print(f"Translating {len(pending_indexes)}/{len(texts)} subtitles with {TRANSLATION_PROVIDER}/{display_model_name(TRANSLATION_MODEL)}; batch size={TRANSLATION_BATCH_SIZE}", flush=True)
+    completed = len(texts) - len(pending_indexes)
     if progress is not None and texts:
-        progress("translating", 92, f"Translating subtitles 0/{len(texts)}")
-    for start in range(0, len(texts), TRANSLATION_BATCH_SIZE):
-        batch = prepared_texts[start : start + TRANSLATION_BATCH_SIZE]
-        end = min(start + len(batch), len(texts))
-        print(f"Translation batch {start + 1}-{end}/{len(texts)}", flush=True)
+        progress("translating", 92, f"Translating subtitles {completed}/{len(texts)}")
+    for pending_start in range(0, len(pending_indexes), TRANSLATION_BATCH_SIZE):
+        indexes = pending_indexes[pending_start:pending_start + TRANSLATION_BATCH_SIZE]
+        batch = [prepared_texts[index] for index in indexes]
+        print(f"Translation batch {completed + 1}-{completed + len(batch)}/{len(texts)}", flush=True)
         write_runtime_status(
             stage="translating",
-            message=f"Translation batch {start + 1}-{end}/{len(texts)}",
+            message=f"Translation batch {completed + 1}-{completed + len(batch)}/{len(texts)}",
             translation_total=len(texts),
-            translation_done=start,
-            translation_batch=f"{start + 1}-{end}/{len(texts)}",
+            translation_done=completed,
+            translation_batch=f"{completed + 1}-{completed + len(batch)}/{len(texts)}",
         )
         try:
             translations = translator(batch)
         except Exception as exc:
             raise RuntimeError(f"translation failed: {exc}") from exc
-        for offset, translation in enumerate(translations):
-            index = start + offset
-            translated[index] = polish_caption_translation(texts[index], prepared_texts[index], translation)
-        mapped_progress = 92 + int((end / max(1, len(texts))) * 7)
+        if len(translations) != len(indexes):
+            raise RuntimeError("translation model returned an unexpected batch size")
+        for index, translation in zip(indexes, translations):
+            translated[index] = safe_caption_translation(texts[index], prepared_texts[index], translation)
+        completed += len(indexes)
+        mapped_progress = 92 + int((completed / max(1, len(texts))) * 7)
         if progress is not None:
-            progress("translating", min(99, mapped_progress), f"Translating subtitles {end}/{len(texts)}")
+            progress("translating", min(99, mapped_progress), f"Translating subtitles {completed}/{len(texts)}")
         write_runtime_status(
             stage="translating",
             progress=min(99, mapped_progress),
-            message=f"Translated {end}/{len(texts)} subtitles",
+            message=f"Translated {completed}/{len(texts)} subtitles",
             translation_total=len(texts),
-            translation_done=end,
-            translation_batch=f"{start + 1}-{end}/{len(texts)}",
+            translation_done=completed,
+            translation_batch=f"{completed - len(indexes) + 1}-{completed}/{len(texts)}",
         )
     return translated
 
@@ -1677,15 +1964,33 @@ def build_transformers_translator():
         if forced_bos_token_id is None or forced_bos_token_id == tokenizer.unk_token_id:
             raise RuntimeError(f"NLLB target language token is unavailable: {TRANSLATION_TARGET_LANGUAGE}")
 
-    def translate_batch(texts):
+    def generate_translations(texts, num_beams=4, max_new_tokens=None):
         encoded = tokenizer(texts, return_tensors="pt", padding=True, truncation=True, max_length=512)
         encoded = {name: tensor.to(device) for name, tensor in encoded.items()}
-        generation_options = {"max_new_tokens": 256, "num_beams": 4, "length_penalty": 1.35, "early_stopping": False}
+        source_words = max((len(re.findall(r"\w+", text)) for text in texts), default=1)
+        token_limit = max_new_tokens or min(96, max(16, source_words * 3 + 8))
+        generation_options = {
+            "max_new_tokens": token_limit,
+            "num_beams": num_beams,
+            "length_penalty": 1.0,
+            "early_stopping": num_beams > 1,
+            "no_repeat_ngram_size": 3,
+            "repetition_penalty": 1.15,
+        }
         if forced_bos_token_id is not None:
             generation_options["forced_bos_token_id"] = forced_bos_token_id
         with torch.inference_mode():
             generated = model.generate(**encoded, **generation_options)
         return [text.strip() for text in tokenizer.batch_decode(generated, skip_special_tokens=True)]
+
+    def translate_batch(texts):
+        translations = generate_translations(texts)
+        for index, (source, translation) in enumerate(zip(texts, translations)):
+            if not translation_is_degenerate(source, translation):
+                continue
+            retry = generate_translations([source], num_beams=1, max_new_tokens=min(48, max(12, len(source.split()) * 2 + 6)))[0]
+            translations[index] = retry if not translation_is_degenerate(source, retry) else (deterministic_caption_translation(source) or source)
+        return translations
 
     language_pair = f"{TRANSLATION_SOURCE_LANGUAGE}->{TRANSLATION_TARGET_LANGUAGE}" if is_nllb else "model default"
     write_runtime_status(
