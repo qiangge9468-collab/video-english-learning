@@ -51,7 +51,7 @@ v2.0.5 新增随电脑服务自动打开的本地网页仪表盘，可以直接�
 
 v2.0.5 是当前推荐版本，在保留 v2.0.4 字幕断句、语音空洞修复、翻译完整性和后台队列能力的基础上，新增独立的电脑端本地网页仪表盘。
 
-- 运行 `tools/start_video_english_service_v2.0.5.ps1` 后，脚本等待服务就绪并自动用默认浏览器打开仪表盘；页面关闭不影响电脑继续处理任务。
+- 运行 `tools/versions/v2.0.5/start_service.ps1` 后，脚本等待服务就绪并自动用默认浏览器打开仪表盘；页面关闭不影响电脑继续处理任务。
 - 当前任务卡会突出显示视频文件名、状态、处理阶段、总进度、音频时间、预计剩余时间、字幕/翻译数量和任务 ID，不再需要从 PowerShell 长日志里猜正在处理哪个视频。
 - 等待队列按 FIFO 位置显示视频名和提交时间；最近任务保留完成或错误状态及错误摘要。
 - 模型区域显示 Whisper、SaT + spaCy 语义断句器、NLLB 翻译器、识别语言和持久化目录；GPU 区域显示名称、利用率、显存和温度。
@@ -154,12 +154,12 @@ v1.0.0 是早期版本，功能集中在单个学习页面里。
 
 | 手机 APK | 电脑端启动入口 | 实际服务源码 | 说明 |
 | --- | --- | --- | --- |
-| `release/app-v1.0.0.apk`、`release/app-v2.0.0.apk` | `tools/start_video_english_service.ps1` | `tools/local_whisper_service.py` | GitHub 原有旧版组合，文件继续保留 |
-| `release/app-v2.0.1.apk` | `tools/start_video_english_service.ps1` | `tools/local_whisper_service.py` | 仍使用旧协议；如需完全复现当时行为，建议使用 v2.0.1 发布时的提交 |
-| `release/app-v2.0.2.apk` | `tools/start_video_english_service_v2.0.2.ps1` | `tools/local_whisper_service_v2.0.2.py` | 支持断点上传、电脑持久化任务、音频/字幕缓存复用和离线进度恢复 |
-| `release/app-v2.0.3.apk` | `tools/start_video_english_service_v2.0.3.ps1` | `tools/local_whisper_service_v2.0.3.py` | 增加 SaT + spaCy 语义断句，并保留持久上传和 FIFO 队列 |
-| `release/app-v2.0.4.apk` | `tools/start_video_english_service_v2.0.4.ps1` | `tools/local_whisper_service_v2.0.4.py` | 增加运行中新增视频优先上传、连续后台锁、0.05 秒时间微调，以及服务重启后的地址/token 自动刷新 |
-| `release/app-v2.0.5.apk` | `tools/start_video_english_service_v2.0.5.ps1` | `tools/local_whisper_service_v2.0.5.py` | 当前推荐组合；完整保留 v2.0.4 能力，并新增自动打开的本地网页仪表盘 |
+| `release/app-v1.0.0.apk`、`release/app-v2.0.0.apk` | `tools/versions/legacy/start_service.ps1` | `tools/versions/legacy/service.py` | GitHub 原有旧版组合，文件继续保留 |
+| `release/app-v2.0.1.apk` | `tools/versions/legacy/start_service.ps1` | `tools/versions/legacy/service.py` | 仍使用旧协议；如需完全复现当时行为，建议使用 v2.0.1 发布时的提交 |
+| `release/app-v2.0.2.apk` | `tools/versions/v2.0.2/start_service.ps1` | `tools/versions/v2.0.2/service.py` | 支持断点上传、电脑持久化任务、音频/字幕缓存复用和离线进度恢复 |
+| `release/app-v2.0.3.apk` | `tools/versions/v2.0.3/start_service.ps1` | `tools/versions/v2.0.3/service.py` | 增加 SaT + spaCy 语义断句，并保留持久上传和 FIFO 队列 |
+| `release/app-v2.0.4.apk` | `tools/versions/v2.0.4/start_service.ps1` | `tools/versions/v2.0.4/service.py` | 增加运行中新增视频优先上传、连续后台锁、0.05 秒时间微调，以及服务重启后的地址/token 自动刷新 |
+| `release/app-v2.0.5.apk` | `tools/versions/v2.0.5/start_service.ps1` | `tools/versions/v2.0.5/service.py` | 当前推荐组合；完整保留 v2.0.4 能力，并新增自动打开的本地网页仪表盘 |
 
 升级电脑端版本时，请先等待旧电脑端队列结束并按 `Ctrl + C` 关闭旧服务，再安装对应 APK，最后运行同版本启动脚本。旧 APK、启动脚本和服务源码都可以继续保留，但两个服务不能同时占用默认的 8766 端口。
 
@@ -173,7 +173,7 @@ v1.0.0 是早期版本，功能集中在单个学习页面里。
 
 ```powershell
 cd C:\tmp\video-english-learning-remote
-powershell -ExecutionPolicy Bypass -File tools/start_video_english_service_v2.0.5.ps1
+powershell -ExecutionPolicy Bypass -File tools/versions/v2.0.5/start_service.ps1
 ```
 
 这个脚本会同时启动字幕识别、中文翻译和连接服务。服务就绪后会自动打开 `http://127.0.0.1:8766/dashboard?token=...` 本地仪表盘；PowerShell 窗口仍负责保持服务运行并输出精简状态。正常启动后可以看到三类地址：
@@ -185,7 +185,7 @@ powershell -ExecutionPolicy Bypass -File tools/start_video_english_service_v2.0.
 这些地址也会保存到：
 
 ```text
-tools/latest_service_urls_v2.0.5.txt
+tools/runtime/v2.0.5/latest_service_urls.txt
 ```
 
 如果手机端不知道该填哪个地址，优先看这个文件。
@@ -283,7 +283,7 @@ GitHub 链接用于查看开源项目和下载最新版本安装包。
 
 ```powershell
 cd C:\tmp\video-english-learning-remote
-powershell -ExecutionPolicy Bypass -File tools/start_video_english_service_v2.0.5.ps1
+powershell -ExecutionPolicy Bypass -File tools/versions/v2.0.5/start_service.ps1
 ```
 
 保持这个 PowerShell 窗口打开。脚本会自动弹出本地网页，网页显示当前视频、总进度、阶段、预计剩余时间、模型、语义断句器、连接地址、GPU、FIFO 队列以及最近完成/失败任务。页面每 2 秒自动刷新；关闭或刷新页面不会停止任务。
@@ -291,7 +291,7 @@ powershell -ExecutionPolicy Bypass -File tools/start_video_english_service_v2.0.
 如果只想启动服务而不自动打开浏览器，可加 `-NoDashboard`：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File tools/start_video_english_service_v2.0.5.ps1 -NoDashboard
+powershell -ExecutionPolicy Bypass -File tools/versions/v2.0.5/start_service.ps1 -NoDashboard
 ```
 
 ### 电脑端持久化目录
@@ -313,7 +313,7 @@ service_data_v2.0.5/
 
 ```powershell
 $env:VIDEO_ENGLISH_DATA_DIR="D:\video-english-service-data"
-powershell -ExecutionPolicy Bypass -File tools/start_video_english_service_v2.0.5.ps1
+powershell -ExecutionPolicy Bypass -File tools/versions/v2.0.5/start_service.ps1
 ```
 
 删除 `service_data_v2.0.5`（或你自定义的目录）会清除电脑端音频、任务和字幕缓存；不会删除手机里的视频及已经保存到手机的字幕。
@@ -360,7 +360,7 @@ https://xxxx.trycloudflare.com/transcribe?token=你的token
 公网地址生成后会显示在 PowerShell 窗口，也会写入：
 
 ```text
-tools/latest_service_urls_v2.0.5.txt
+tools/runtime/v2.0.5/latest_service_urls.txt
 ```
 
 注意：Cloudflare 免费临时隧道不是永久地址。每次重新启动服务后，公网地址可能会变化，需要在手机端重新填写或等待 App 自动更新。
@@ -391,7 +391,7 @@ winget install --id Cloudflare.cloudflared
 cd C:\tmp\video-english-learning-remote
 python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"
 python -c "import ctranslate2; print(ctranslate2.get_cuda_device_count())"
-powershell -ExecutionPolicy Bypass -File tools/test_gpu_models.ps1
+powershell -ExecutionPolicy Bypass -File tools/tests/integration/test_gpu_models.ps1
 ```
 
 如果提示缺少 CUDA 相关 DLL，例如 `cublas64_12.dll`，需要安装匹配的 CUDA / cuDNN 运行环境，或者安装带 CUDA 支持的 Python 依赖。
@@ -420,7 +420,7 @@ $env:HTTPS_PROXY="http://127.0.0.1:7897"
 - 同一个 Wi-Fi：用局域网地址。
 - 手机流量：用公网备用地址。
 
-正常情况下拔掉 USB 后会在最长约 10 秒内改走局域网或公网，任务卡会清除已经失效的 USB 标签；重新插入同一部手机后，启动脚本会自动补回 `adb reverse tcp:8766 tcp:8766`，不需要重启脚本。如果所有地址都失败，再打开 `tools/latest_service_urls_v2.0.5.txt`，确认里面是本次启动产生的最新地址；也可以把完整地址复制到手机端测试。
+正常情况下拔掉 USB 后会在最长约 10 秒内改走局域网或公网，任务卡会清除已经失效的 USB 标签；重新插入同一部手机后，启动脚本会自动补回 `adb reverse tcp:8766 tcp:8766`，不需要重启脚本。如果所有地址都失败，再打开 `tools/runtime/v2.0.5/latest_service_urls.txt`，确认里面是本次启动产生的最新地址；也可以把完整地址复制到手机端测试。
 
 当前 v2.0.5 包会在每次后台重连时重新读取 App 保存的服务地址列表。电脑服务重启并产生新 token 后，只要最新完整地址已经写入 App，运行中的任务会自动切换，不必先暂停再继续。电脑端已经取得任务 ID 后会独立处理，手机重连只影响进度和结果同步。
 
@@ -438,7 +438,7 @@ https://xxxx.trycloudflare.com/transcribe?token=...
 
 ### 3. 提示 HTTP 401
 
-这是 token 不匹配。请使用电脑端窗口或 `tools/latest_service_urls_v2.0.5.txt` 里完整的地址，确保 `?token=...` 没有漏掉。安装仓库当前的 v2.0.5 包后，运行中的后台任务会在下一次重连时重新读取这个最新地址；旧版 v2.0.4 包如仍停留在“等待连接电脑”，需要手动暂停再继续一次。
+这是 token 不匹配。请使用电脑端窗口或 `tools/runtime/v2.0.5/latest_service_urls.txt` 里完整的地址，确保 `?token=...` 没有漏掉。安装仓库当前的 v2.0.5 包后，运行中的后台任务会在下一次重连时重新读取这个最新地址；旧版 v2.0.4 包如仍停留在“等待连接电脑”，需要手动暂停再继续一次。
 
 ### 4. 提示 Broken pipe、unexpected end of stream 或上传中断
 
@@ -462,11 +462,11 @@ v2.0.4 会把音频分块上传并由电脑持久化已确认偏移。网络恢�
 
 ### 8. 旧字幕有连续语音空洞或中文重复
 
-请确认运行的是仓库当前的 `tools/local_whisper_service_v2.0.5.py`，然后在手机端对该视频选择“重新识别并翻译”。本修复会让电脑端旧版流水线缓存自动失效并重新识别，但手机里已经下载的旧字幕不会被后台静默覆盖，必须主动重新生成一次。新双语字幕完整返回前，原字幕仍可继续使用。
+请确认运行的是仓库当前的 `tools/versions/v2.0.5/service.py`，然后在手机端对该视频选择“重新识别并翻译”。本修复会让电脑端旧版流水线缓存自动失效并重新识别，但手机里已经下载的旧字幕不会被后台静默覆盖，必须主动重新生成一次。新双语字幕完整返回前，原字幕仍可继续使用。
 
 ### 9. 中文只翻译了英文前半句
 
-请先让电脑当前队列任务完成，再关闭旧服务窗口并重新运行 `tools/start_video_english_service_v2.0.5.ps1`。在手机端对该视频选择“仅重翻中文”即可复用现有英文字幕，无需重新运行 Whisper。当前电脑服务会自动拒绝旧的残缺双语缓存，并用完整性优先参数重新翻译。
+请先让电脑当前队列任务完成，再关闭旧服务窗口并重新运行 `tools/versions/v2.0.5/start_service.ps1`。在手机端对该视频选择“仅重翻中文”即可复用现有英文字幕，无需重新运行 Whisper。当前电脑服务会自动拒绝旧的残缺双语缓存，并用完整性优先参数重新翻译。
 
 如果中文仍明显短于英文，电脑端会把它判定为不完整并自动重试；重试仍失败时宁可保留英文，也不会把误导性的半句中文写入缓存。
 
@@ -499,14 +499,14 @@ cd C:\tmp\video-english-learning-remote
 电脑端服务主要文件：
 
 ```text
-tools/start_video_english_service_v2.0.5.ps1
-tools/local_whisper_service_v2.0.5.py
-tools/dashboard_v2.0.5.html
-tools/semantic_caption_segmenter.py
-tools/semantic_segmenter_worker_v2_0_5.py
-tools/start_video_english_service.ps1          旧版入口（保留）
-tools/local_whisper_service.py                 旧版服务（保留）
-tools/test_gpu_models.ps1
+tools/versions/v2.0.5/start_service.ps1
+tools/versions/v2.0.5/service.py
+tools/versions/v2.0.5/dashboard.html
+tools/shared/semantic_caption_segmenter.py
+tools/versions/v2.0.5/semantic_worker.py
+tools/versions/legacy/start_service.ps1          旧版入口（保留）
+tools/versions/legacy/service.py                 旧版服务（保留）
+tools/tests/integration/test_gpu_models.ps1
 ```
 
 Android 端主要代码：
@@ -522,7 +522,7 @@ app/src/main/java/com/codex/videolearnenglish/CaptionGenerationService.kt
 app/                         Android App 源码
 models/                      本地 Whisper 和翻译模型
 release/                     已打包 APK
-tools/                       电脑端服务脚本和调试工具
+tools/                       按版本和用途整理的电脑端工具
 README.md                    项目说明
 ```
 

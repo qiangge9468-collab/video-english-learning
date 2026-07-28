@@ -13,7 +13,7 @@ Flow:
 ## Start The Service
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File tools/start_remote_whisper_service.ps1
+powershell -ExecutionPolicy Bypass -File tools/network/start_remote_whisper_service.ps1
 ```
 
 The script prints an auth token. Keep the service window open.
@@ -56,14 +56,14 @@ winget install --id Cloudflare.cloudflared
 Or put `cloudflared.exe` at:
 
 ```text
-tools/cloudflared.exe
+tools/network/cloudflared.exe
 ```
 
 Run this in a second PowerShell window:
 
 ```powershell
 $env:WHISPER_AUTH_TOKEN="paste the token printed by the service"
-powershell -ExecutionPolicy Bypass -File tools/start_cloudflare_tunnel.ps1
+powershell -ExecutionPolicy Bypass -File tools/network/start_cloudflare_tunnel.ps1
 ```
 
 When a `trycloudflare.com` URL appears, set the app service URL to:
@@ -83,7 +83,7 @@ For phone mobile data, guest Wi-Fi, or any network that is not the same LAN as t
 This starts the Whisper service with a token and opens Cloudflare Tunnel in one PowerShell window:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File tools/start_public_whisper_service.ps1
+powershell -ExecutionPolicy Bypass -File tools/network/start_public_whisper_service.ps1
 ```
 
 The script prints an `Auth token` first. A few seconds later, `cloudflared` prints an HTTPS URL like:
@@ -103,7 +103,7 @@ Tap `测试`. If it says the Whisper service is reachable, return and tap `生�
 You can also test the public URL from the computer before using the phone:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File tools/test_remote_whisper_service.ps1 `
+powershell -ExecutionPolicy Bypass -File tools/tests/integration/test_remote_whisper_service.ps1 `
   -AppUrl "https://xxxxx.trycloudflare.com/transcribe" `
   -Token "<Auth token printed by the script>"
 ```
@@ -125,5 +125,5 @@ For NVIDIA CUDA:
 ```powershell
 $env:WHISPER_DEVICE="cuda"
 $env:WHISPER_COMPUTE_TYPE="float16"
-powershell -ExecutionPolicy Bypass -File tools/start_remote_whisper_service.ps1
+powershell -ExecutionPolicy Bypass -File tools/network/start_remote_whisper_service.ps1
 ```
