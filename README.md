@@ -8,6 +8,7 @@
 
 从 v2.0.2 开始，手机只负责可断点续传的音频上传和进度查询；电脑接收完整音频后会独立跑完识别与翻译。即使手机锁屏、App 被系统重建或网络暂时断开，电脑任务也不会中止，手机恢复连接后会继续显示同一个任务的进度并取回结果。
 v2.0.4 进一步解决运行中新增视频的调度问题：即使手机正在查询一个长视频的电脑处理进度，新加入的视频也会立即优先提取并上传音频、提交到电脑 FIFO 队列，然后手机再恢复原任务查询。电脑收到完整音频和任务 ID 后，即使手机锁屏、切换应用或断开连接，也会独立继续识别和翻译。
+v2.0.5 新增随电脑服务自动打开的本地网页仪表盘，可以直接看到当前处理的视频、阶段与总进度、预计剩余时间、FIFO 队列、最近任务、模型、GPU 和 USB/局域网/公网连接地址。
 
 
 ## 适合谁使用
@@ -46,9 +47,24 @@ v2.0.4 进一步解决运行中新增视频的调度问题：即使手机正在�
 
 ## 版本说明
 
+### v2.0.5
+
+v2.0.5 是当前推荐版本，在保留 v2.0.4 字幕断句、语音空洞修复、翻译完整性和后台队列能力的基础上，新增独立的电脑端本地网页仪表盘。
+
+- 运行 `tools/start_video_english_service_v2.0.5.ps1` 后，脚本等待服务就绪并自动用默认浏览器打开仪表盘；页面关闭不影响电脑继续处理任务。
+- 当前任务卡会突出显示视频文件名、状态、处理阶段、总进度、音频时间、预计剩余时间、字幕/翻译数量和任务 ID，不再需要从 PowerShell 长日志里猜正在处理哪个视频。
+- 等待队列按 FIFO 位置显示视频名和提交时间；最近任务保留完成或错误状态及错误摘要。
+- 模型区域显示 Whisper、SaT + spaCy 语义断句器、NLLB 翻译器、识别语言和持久化目录；GPU 区域显示名称、利用率、显存和温度。
+- 连接区域集中显示 USB、局域网和 Cloudflare 公网地址，token 默认遮挡但可以一键复制完整地址。
+- 仪表盘和 `/api/dashboard` 使用与字幕接口相同的 token 校验，页面每 2 秒只读取轻量状态，不会加载模型、修改队列或中断识别。
+- v2.0.5 使用独立的 `service_data_v2.0.5`、运行状态文件和版本化 Python/PowerShell 文件，不覆盖 v2.0.4。
+- Android 包版本同步升级为 2.0.5，App 内电脑端帮助和启动命令均指向 v2.0.5。
+
+安装包位置：`release/app-v2.0.5.apk`
+
 ### v2.0.4
 
-v2.0.4 是当前推荐版本，重点改进英文字幕断句、语音覆盖完整性、翻译稳定性、后台上传调度和音画微调精度。
+v2.0.4 重点改进英文字幕断句、语音覆盖完整性、翻译稳定性、后台上传调度和音画微调精度。
 
 - 英文识别保留 Whisper `word_timestamps`、VAD、静音间隔和标点信息，并使用 SaT `sat-12l-sm` 与 spaCy `en_core_web_trf` 辅助寻找更自然的英文句子边界。
 - 语义断句会惩罚介词、限定词、助动词和未完成短语后的切分，减少 `beautiful / River`、单独一条 `The` 等不自然字幕。
@@ -134,7 +150,7 @@ v1.0.0 是早期版本，功能集中在单个学习页面里。
 
 ## APK 与电脑端服务兼容性
 
-仓库同时保留旧版以及 v2.0.2、v2.0.3、v2.0.4 的版本化电脑端文件。不同版本请按下表成套使用，测试新版本时不需要覆盖旧源码。
+仓库同时保留旧版以及 v2.0.2、v2.0.3、v2.0.4、v2.0.5 的版本化电脑端文件。不同版本请按下表成套使用，测试新版本时不需要覆盖旧源码。
 
 | 手机 APK | 电脑端启动入口 | 实际服务源码 | 说明 |
 | --- | --- | --- | --- |
@@ -142,11 +158,12 @@ v1.0.0 是早期版本，功能集中在单个学习页面里。
 | `release/app-v2.0.1.apk` | `tools/start_video_english_service.ps1` | `tools/local_whisper_service.py` | 仍使用旧协议；如需完全复现当时行为，建议使用 v2.0.1 发布时的提交 |
 | `release/app-v2.0.2.apk` | `tools/start_video_english_service_v2.0.2.ps1` | `tools/local_whisper_service_v2.0.2.py` | 支持断点上传、电脑持久化任务、音频/字幕缓存复用和离线进度恢复 |
 | `release/app-v2.0.3.apk` | `tools/start_video_english_service_v2.0.3.ps1` | `tools/local_whisper_service_v2.0.3.py` | 增加 SaT + spaCy 语义断句，并保留持久上传和 FIFO 队列 |
-| `release/app-v2.0.4.apk` | `tools/start_video_english_service_v2.0.4.ps1` | `tools/local_whisper_service_v2.0.4.py` | 当前推荐组合；增加运行中新增视频优先上传、连续后台锁、0.05 秒时间微调，以及服务重启后的地址/token 自动刷新 |
+| `release/app-v2.0.4.apk` | `tools/start_video_english_service_v2.0.4.ps1` | `tools/local_whisper_service_v2.0.4.py` | 增加运行中新增视频优先上传、连续后台锁、0.05 秒时间微调，以及服务重启后的地址/token 自动刷新 |
+| `release/app-v2.0.5.apk` | `tools/start_video_english_service_v2.0.5.ps1` | `tools/local_whisper_service_v2.0.5.py` | 当前推荐组合；完整保留 v2.0.4 能力，并新增自动打开的本地网页仪表盘 |
 
 升级电脑端版本时，请先等待旧电脑端队列结束并按 `Ctrl + C` 关闭旧服务，再安装对应 APK，最后运行同版本启动脚本。旧 APK、启动脚本和服务源码都可以继续保留，但两个服务不能同时占用默认的 8766 端口。
 
-升级不会主动删除手机里已有的视频、字幕、学习进度或单词本。v2.0.4 默认使用独立的 `service_data_v2.0.4` 目录，避免测试新服务时覆盖旧版本数据。
+升级不会主动删除手机里已有的视频、字幕、学习进度或单词本。v2.0.5 默认使用独立的 `service_data_v2.0.5` 目录，避免测试新服务时覆盖旧版本数据。
 
 ## 推荐使用流程
 
@@ -156,10 +173,10 @@ v1.0.0 是早期版本，功能集中在单个学习页面里。
 
 ```powershell
 cd C:\tmp\video-english-learning-remote
-powershell -ExecutionPolicy Bypass -File tools/start_video_english_service_v2.0.4.ps1
+powershell -ExecutionPolicy Bypass -File tools/start_video_english_service_v2.0.5.ps1
 ```
 
-这个脚本会同时启动字幕识别、中文翻译和连接服务。正常启动后，PowerShell 窗口会显示三类地址：
+这个脚本会同时启动字幕识别、中文翻译和连接服务。服务就绪后会自动打开 `http://127.0.0.1:8766/dashboard?token=...` 本地仪表盘；PowerShell 窗口仍负责保持服务运行并输出精简状态。正常启动后可以看到三类地址：
 
 - USB/模拟器地址：手机用 USB 连接电脑时优先使用。
 - 局域网地址：手机和电脑在同一个 Wi-Fi 下使用。
@@ -168,7 +185,7 @@ powershell -ExecutionPolicy Bypass -File tools/start_video_english_service_v2.0.
 这些地址也会保存到：
 
 ```text
-tools/latest_service_urls_v2.0.4.txt
+tools/latest_service_urls_v2.0.5.txt
 ```
 
 如果手机端不知道该填哪个地址，优先看这个文件。
@@ -266,17 +283,23 @@ GitHub 链接用于查看开源项目和下载最新版本安装包。
 
 ```powershell
 cd C:\tmp\video-english-learning-remote
-powershell -ExecutionPolicy Bypass -File tools/start_video_english_service_v2.0.4.ps1
+powershell -ExecutionPolicy Bypass -File tools/start_video_english_service_v2.0.5.ps1
 ```
 
-保持这个 PowerShell 窗口打开，电脑端会显示当前模型、语义断句器、连接地址、GPU 使用情况、FIFO 队列、识别进度和翻译进度。
+保持这个 PowerShell 窗口打开。脚本会自动弹出本地网页，网页显示当前视频、总进度、阶段、预计剩余时间、模型、语义断句器、连接地址、GPU、FIFO 队列以及最近完成/失败任务。页面每 2 秒自动刷新；关闭或刷新页面不会停止任务。
+
+如果只想启动服务而不自动打开浏览器，可加 `-NoDashboard`：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools/start_video_english_service_v2.0.5.ps1 -NoDashboard
+```
 
 ### 电脑端持久化目录
 
-v2.0.4 默认把可复用数据放在项目根目录的 `service_data_v2.0.4` 中：
+v2.0.5 默认把可复用数据放在项目根目录的 `service_data_v2.0.5` 中：
 
 ```text
-service_data_v2.0.4/
+service_data_v2.0.5/
   audio/       按音频 SHA-256 保存的原始音频
   cache/       每个音频的 english.json 和 bilingual.json
   jobs/        每个电脑任务的 status.json、result.json 和输入数据
@@ -290,10 +313,10 @@ service_data_v2.0.4/
 
 ```powershell
 $env:VIDEO_ENGLISH_DATA_DIR="D:\video-english-service-data"
-powershell -ExecutionPolicy Bypass -File tools/start_video_english_service_v2.0.4.ps1
+powershell -ExecutionPolicy Bypass -File tools/start_video_english_service_v2.0.5.ps1
 ```
 
-删除 `service_data_v2.0.4`（或你自定义的目录）会清除电脑端音频、任务和字幕缓存；不会删除手机里的视频及已经保存到手机的字幕。
+删除 `service_data_v2.0.5`（或你自定义的目录）会清除电脑端音频、任务和字幕缓存；不会删除手机里的视频及已经保存到手机的字幕。
 
 停止服务时按：
 
@@ -337,7 +360,7 @@ https://xxxx.trycloudflare.com/transcribe?token=你的token
 公网地址生成后会显示在 PowerShell 窗口，也会写入：
 
 ```text
-tools/latest_service_urls_v2.0.4.txt
+tools/latest_service_urls_v2.0.5.txt
 ```
 
 注意：Cloudflare 免费临时隧道不是永久地址。每次重新启动服务后，公网地址可能会变化，需要在手机端重新填写或等待 App 自动更新。
@@ -397,9 +420,9 @@ $env:HTTPS_PROXY="http://127.0.0.1:7897"
 - 同一个 Wi-Fi：用局域网地址。
 - 手机流量：用公网备用地址。
 
-正常情况下拔掉 USB 后会在最长约 10 秒内改走局域网或公网，任务卡会清除已经失效的 USB 标签；重新插入同一部手机后，启动脚本会自动补回 `adb reverse tcp:8766 tcp:8766`，不需要重启脚本。如果所有地址都失败，再打开 `tools/latest_service_urls_v2.0.4.txt`，确认里面是本次启动产生的最新地址；也可以把完整地址复制到手机端测试。
+正常情况下拔掉 USB 后会在最长约 10 秒内改走局域网或公网，任务卡会清除已经失效的 USB 标签；重新插入同一部手机后，启动脚本会自动补回 `adb reverse tcp:8766 tcp:8766`，不需要重启脚本。如果所有地址都失败，再打开 `tools/latest_service_urls_v2.0.5.txt`，确认里面是本次启动产生的最新地址；也可以把完整地址复制到手机端测试。
 
-当前 v2.0.4 修复包会在每次后台重连时重新读取 App 保存的服务地址列表。电脑服务重启并产生新 token 后，只要最新完整地址已经写入 App，运行中的任务会自动切换，不必先暂停再继续。电脑端已经取得任务 ID 后会独立处理，手机重连只影响进度和结果同步。
+当前 v2.0.5 包会在每次后台重连时重新读取 App 保存的服务地址列表。电脑服务重启并产生新 token 后，只要最新完整地址已经写入 App，运行中的任务会自动切换，不必先暂停再继续。电脑端已经取得任务 ID 后会独立处理，手机重连只影响进度和结果同步。
 
 如果 USB 调试授权被手机撤销，仍需在手机弹窗中重新允许 USB 调试。可以用 `adb devices` 确认设备状态是 `device`，而不是 `unauthorized` 或 `offline`。
 
@@ -415,7 +438,7 @@ https://xxxx.trycloudflare.com/transcribe?token=...
 
 ### 3. 提示 HTTP 401
 
-这是 token 不匹配。请使用电脑端窗口或 `tools/latest_service_urls_v2.0.4.txt` 里完整的地址，确保 `?token=...` 没有漏掉。安装仓库当前的 v2.0.4 修复包后，运行中的后台任务会在下一次重连时重新读取这个最新地址；旧版 v2.0.4 包如仍停留在“等待连接电脑”，需要手动暂停再继续一次。
+这是 token 不匹配。请使用电脑端窗口或 `tools/latest_service_urls_v2.0.5.txt` 里完整的地址，确保 `?token=...` 没有漏掉。安装仓库当前的 v2.0.5 包后，运行中的后台任务会在下一次重连时重新读取这个最新地址；旧版 v2.0.4 包如仍停留在“等待连接电脑”，需要手动暂停再继续一次。
 
 ### 4. 提示 Broken pipe、unexpected end of stream 或上传中断
 
@@ -439,20 +462,20 @@ v2.0.4 会把音频分块上传并由电脑持久化已确认偏移。网络恢�
 
 ### 8. 旧字幕有连续语音空洞或中文重复
 
-请确认运行的是仓库当前的 `tools/local_whisper_service_v2.0.4.py`，然后在手机端对该视频选择“重新识别并翻译”。本修复会让电脑端旧版流水线缓存自动失效并重新识别，但手机里已经下载的旧字幕不会被后台静默覆盖，必须主动重新生成一次。新双语字幕完整返回前，原字幕仍可继续使用。
+请确认运行的是仓库当前的 `tools/local_whisper_service_v2.0.5.py`，然后在手机端对该视频选择“重新识别并翻译”。本修复会让电脑端旧版流水线缓存自动失效并重新识别，但手机里已经下载的旧字幕不会被后台静默覆盖，必须主动重新生成一次。新双语字幕完整返回前，原字幕仍可继续使用。
 
 ### 9. 中文只翻译了英文前半句
 
-请先让电脑当前队列任务完成，再关闭旧服务窗口并重新运行 `tools/start_video_english_service_v2.0.4.ps1`。在手机端对该视频选择“仅重翻中文”即可复用现有英文字幕，无需重新运行 Whisper。当前电脑服务会自动拒绝旧的残缺双语缓存，并用完整性优先参数重新翻译。
+请先让电脑当前队列任务完成，再关闭旧服务窗口并重新运行 `tools/start_video_english_service_v2.0.5.ps1`。在手机端对该视频选择“仅重翻中文”即可复用现有英文字幕，无需重新运行 Whisper。当前电脑服务会自动拒绝旧的残缺双语缓存，并用完整性优先参数重新翻译。
 
 如果中文仍明显短于英文，电脑端会把它判定为不完整并自动重试；重试仍失败时宁可保留英文，也不会把误导性的半句中文写入缓存。
 
 ## 数据保存和隐私
 
 - 视频文件保存在你自己的手机里，App 不会主动上传到公共服务器。
-- 只有在你点击生成字幕或翻译时，App 才会把提取出的音频发送到你自己配置的电脑端服务；v2.0.4 默认会把音频保存在 `service_data_v2.0.4/audio` 供以后复用。
+- 只有在你点击生成字幕或翻译时，App 才会把提取出的音频发送到你自己配置的电脑端服务；v2.0.5 默认会把音频保存在 `service_data_v2.0.5/audio` 供以后复用。
 - 字幕、翻译、学习进度和单词本会保存在手机本地。
-- 电脑端还会在 `service_data_v2.0.4/cache` 和 `service_data_v2.0.4/jobs` 保存英文字幕、双语字幕、任务进度与结果。需要清除时由你手动删除该目录。
+- 电脑端还会在 `service_data_v2.0.5/cache` 和 `service_data_v2.0.5/jobs` 保存英文字幕、双语字幕、任务进度与结果。需要清除时由你手动删除该目录。
 - 使用 Cloudflare Tunnel 时，数据会经过 Cloudflare 临时隧道转发，适合个人临时使用，不建议暴露给陌生人使用。
 
 ## 开发和构建
@@ -476,10 +499,11 @@ cd C:\tmp\video-english-learning-remote
 电脑端服务主要文件：
 
 ```text
-tools/start_video_english_service_v2.0.4.ps1
-tools/local_whisper_service_v2.0.4.py
+tools/start_video_english_service_v2.0.5.ps1
+tools/local_whisper_service_v2.0.5.py
+tools/dashboard_v2.0.5.html
 tools/semantic_caption_segmenter.py
-tools/semantic_segmenter_worker_v2_0_4.py
+tools/semantic_segmenter_worker_v2_0_5.py
 tools/start_video_english_service.ps1          旧版入口（保留）
 tools/local_whisper_service.py                 旧版服务（保留）
 tools/test_gpu_models.ps1
@@ -506,7 +530,7 @@ README.md                    项目说明
 
 项目开源在 GitHub。用户可以通过“我的 -> GitHub”打开项目主页，查看说明、下载新版 APK、反馈问题或参与改进。
 
-如果你只是安装使用，推荐下载 `release/app-v2.0.4.apk`，并配套运行 v2.0.4 电脑服务。如果你想自己改代码，可以 clone 项目后用 Android Studio 打开。
+如果你只是安装使用，推荐下载 `release/app-v2.0.5.apk`，并配套运行 v2.0.5 电脑服务。如果你想自己改代码，可以 clone 项目后用 Android Studio 打开。
 
 ## 作者
 
