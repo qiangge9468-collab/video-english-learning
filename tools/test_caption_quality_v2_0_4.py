@@ -70,6 +70,33 @@ class CaptionQualityFixTests(unittest.TestCase):
         self.assertTrue(self.service.translation_is_degenerate("www.airflare.com", "\u7f51\u5740\u7f51\u5740\u7f51\u5740" * 30))
         self.assertFalse(self.service.translation_is_degenerate("Ready?", "\u51c6\u5907\u597d\u4e86\u5417\uff1f"))
 
+    def test_incomplete_clause_and_missing_numbers_are_detected(self):
+        first_source = (
+            "It actually does remind me a lot of the Annapurna circuit because also "
+            "with that trek you start at a very low elevation"
+        )
+        second_source = (
+            "Compare that to the Annapurna circuit which sees around 15 to 20 thousand"
+        )
+        self.assertTrue(self.service.translation_is_incomplete(
+            first_source, "\u5b83\u786e\u5b9e\u8ba9\u6211\u60f3\u8d77\u4e86\u5b89\u7eb3\u666e\u5c14\u7eb3\u8d5b\u9053\uff0c"
+        ))
+        self.assertTrue(self.service.translation_is_incomplete(
+            second_source, "\u4e0e\u5b89\u7eb3\u666e\u5c14\u7eb3\u7535\u8def\u76f8\u6bd4\u3002"
+        ))
+        self.assertFalse(self.service.translation_is_incomplete(
+            first_source,
+            "\u5b83\u786e\u5b9e\u8ba9\u6211\u60f3\u8d77\u4e86\u5b89\u7eb3\u666e\u5c14\u7eb3\u73af\u7ebf\uff0c"
+            "\u56e0\u4e3a\u90a3\u6761\u5f92\u6b65\u8def\u7ebf\u4e5f\u662f\u4ece\u5f88\u4f4e\u7684\u6d77\u62d4\u5f00\u59cb\u3002",
+        ))
+
+    def test_thousand_range_is_expanded_before_translation(self):
+        source = (
+            "Compare that to the Annapurna circuit which sees around 15 to 20 thousand"
+        )
+        prepared = self.service.prepare_caption_for_translation(source)
+        self.assertIn("15,000 to 20,000", prepared)
+
     def test_numeric_only_batch_skips_model(self):
         with mock.patch.object(self.service, "get_translator", side_effect=AssertionError("model should not load")):
             result = self.service.translate_texts(["1, 2, 3,", "3, 2, 1."])
@@ -80,6 +107,15 @@ class CaptionQualityFixTests(unittest.TestCase):
         with mock.patch.object(self.service, "get_translator", return_value=translator):
             result = self.service.translate_texts(["Ready for the next exercise?"])
         self.assertEqual(result, ["Ready for the next exercise?"])
+
+    def test_incomplete_model_output_falls_back_without_cache_poisoning(self):
+        source = (
+            "Compare that to the Annapurna circuit which sees around 15 to 20 thousand"
+        )
+        translator = lambda texts: ["\u4e0e\u5b89\u7eb3\u666e\u5c14\u7eb3\u7535\u8def\u76f8\u6bd4\u3002" for _ in texts]
+        with mock.patch.object(self.service, "get_translator", return_value=translator):
+            result = self.service.translate_texts([source])
+        self.assertEqual(result, [source])
 
     def test_old_cache_revision_is_not_reused(self):
         store = mock.Mock()

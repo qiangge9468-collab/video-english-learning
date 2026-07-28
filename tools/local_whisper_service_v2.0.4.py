@@ -89,7 +89,7 @@ MIN_GAP_SECONDS = 0.03
 TRANSLATION_BATCH_SIZE = int(os.environ.get("TRANSLATION_BATCH_SIZE", "16"))
 MAX_UPLOAD_MB = int(os.environ.get("WHISPER_MAX_UPLOAD_MB", "2048"))
 AUTH_TOKEN = os.environ.get("WHISPER_AUTH_TOKEN", "").strip()
-PIPELINE_REVISION = "v2.0.4-caption-quality-fix-1"
+PIPELINE_REVISION = "v2.0.4-caption-quality-fix-2"
 SPEECH_GAP_MIN_SECONDS = float(os.environ.get("WHISPER_SPEECH_GAP_MIN_SECONDS", "2.0"))
 SPEECH_GAP_MAX_SECONDS = float(os.environ.get("WHISPER_SPEECH_GAP_MAX_SECONDS", "18.0"))
 SPEECH_GAP_PAD_SECONDS = float(os.environ.get("WHISPER_SPEECH_GAP_PAD_SECONDS", "0.75"))
@@ -1656,6 +1656,38 @@ def translation_is_degenerate(source, translation):
     return False
 
 
+def translation_content_units(text):
+    return re.findall(r"[\u3400-\u9fff]|[A-Za-z0-9]+", str(text or ""))
+
+
+def translation_is_incomplete(source, translation):
+    source = " ".join(str(source or "").split())
+    text = " ".join(str(translation or "").split())
+    if not source or not text:
+        return bool(source)
+    source_words = re.findall(r"[A-Za-z0-9]+(?:['?-][A-Za-z0-9]+)*", source)
+    if len(source_words) < 8:
+        return False
+
+    source_content_length = len(re.sub(r"[^A-Za-z0-9]", "", source))
+    target_units = translation_content_units(text)
+    target_content_length = sum(
+        1 if re.fullmatch(r"[\u3400-\u9fff]", unit) else len(unit)
+        for unit in target_units
+    )
+    if (
+        len(source_words) >= 10
+        and source_content_length >= 45
+        and target_content_length < max(8, int(source_content_length * 0.18))
+    ):
+        return True
+
+    source_numbers = re.findall(r"\d+(?:[.,]\d+)?", source)
+    if source_numbers and not re.search(r"\d|[\u96f6\u3007\u4e00\u4e8c\u4e24\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d\u5341\u767e\u5343\u4e07\u4ebf]", text):
+        return True
+    return False
+
+
 def safe_caption_translation(source, prepared, translation):
     direct = deterministic_caption_translation(source)
     if direct is not None:
@@ -1663,6 +1695,9 @@ def safe_caption_translation(source, prepared, translation):
     polished = polish_caption_translation(source, prepared, translation)
     if translation_is_degenerate(source, polished):
         print(f"Rejected degenerate translation for: {source[:120]}", flush=True)
+        return " ".join(str(source or "").split())
+    if translation_is_incomplete(source, polished):
+        print(f"Rejected incomplete translation for: {source[:120]}", flush=True)
         return " ".join(str(source or "").split())
     return polished
 
@@ -1736,8 +1771,23 @@ def translate_texts(texts, progress=None):
     return translated
 
 
+def normalize_english_numeric_phrases(text):
+    def expand_thousand_range(match):
+        start = int(match.group(1)) * 1000
+        end = int(match.group(2)) * 1000
+        return f"{start:,} to {end:,}"
+
+    text = re.sub(
+        r"\b(\d{1,3})\s+(?:-|to)\s+(\d{1,3})\s+thousand\b",
+        expand_thousand_range,
+        str(text or ""),
+        flags=re.IGNORECASE,
+    )
+    return text
+
+
 def prepare_caption_for_translation(text):
-    text = " ".join((text or "").split())
+    text = " ".join(normalize_english_numeric_phrases(text).split())
     if TRANSLATION_STYLE in ("", "raw", "none", "off"):
         return text
 
@@ -1964,18 +2014,21 @@ def build_transformers_translator():
         if forced_bos_token_id is None or forced_bos_token_id == tokenizer.unk_token_id:
             raise RuntimeError(f"NLLB target language token is unavailable: {TRANSLATION_TARGET_LANGUAGE}")
 
-    def generate_translations(texts, num_beams=4, max_new_tokens=None):
+    def generate_translations(
+        texts,
+        num_beams=4,
+        max_new_tokens=None,
+        length_penalty=1.35,
+        early_stopping=False,
+    ):
         encoded = tokenizer(texts, return_tensors="pt", padding=True, truncation=True, max_length=512)
         encoded = {name: tensor.to(device) for name, tensor in encoded.items()}
-        source_words = max((len(re.findall(r"\w+", text)) for text in texts), default=1)
-        token_limit = max_new_tokens or min(96, max(16, source_words * 3 + 8))
+        token_limit = max_new_tokens or 256
         generation_options = {
             "max_new_tokens": token_limit,
             "num_beams": num_beams,
-            "length_penalty": 1.0,
-            "early_stopping": num_beams > 1,
-            "no_repeat_ngram_size": 3,
-            "repetition_penalty": 1.15,
+            "length_penalty": length_penalty,
+            "early_stopping": early_stopping,
         }
         if forced_bos_token_id is not None:
             generation_options["forced_bos_token_id"] = forced_bos_token_id
@@ -1986,10 +2039,27 @@ def build_transformers_translator():
     def translate_batch(texts):
         translations = generate_translations(texts)
         for index, (source, translation) in enumerate(zip(texts, translations)):
-            if not translation_is_degenerate(source, translation):
+            is_bad = translation_is_degenerate(source, translation)
+            is_incomplete = translation_is_incomplete(source, translation)
+            if not is_bad and not is_incomplete:
                 continue
-            retry = generate_translations([source], num_beams=1, max_new_tokens=min(48, max(12, len(source.split()) * 2 + 6)))[0]
-            translations[index] = retry if not translation_is_degenerate(source, retry) else (deterministic_caption_translation(source) or source)
+            retry = generate_translations(
+                [source],
+                num_beams=5,
+                max_new_tokens=256,
+                length_penalty=1.50,
+                early_stopping=False,
+            )[0]
+            candidates = [translation, retry]
+            valid = [
+                candidate for candidate in candidates
+                if not translation_is_degenerate(source, candidate)
+                and not translation_is_incomplete(source, candidate)
+            ]
+            if valid:
+                translations[index] = max(valid, key=lambda candidate: len(translation_content_units(candidate)))
+            else:
+                translations[index] = deterministic_caption_translation(source) or source
         return translations
 
     language_pair = f"{TRANSLATION_SOURCE_LANGUAGE}->{TRANSLATION_TARGET_LANGUAGE}" if is_nllb else "model default"
