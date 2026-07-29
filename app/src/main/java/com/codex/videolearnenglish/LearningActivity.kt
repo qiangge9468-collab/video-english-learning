@@ -122,6 +122,7 @@ class LearningActivity : Activity() {
     private var currentTab = MainTab.LEARNING
     private var lastTaskTabRenderAtMs = 0L
     private var taskTabRenderScheduled = false
+    private var processingScrollView: ScrollView? = null
 
     private val pickVideoRequest = 81
     private val pickSubtitleRequest = 82
@@ -647,7 +648,12 @@ class LearningActivity : Activity() {
         setContentView(root)
     }
 
-    private fun renderProcessingPage(parent: LinearLayout) {
+    private fun renderProcessingPage(parent: LinearLayout, preserveScrollPosition: Boolean = false) {
+        val previousScrollY = if (preserveScrollPosition) {
+            processingScrollView?.scrollY ?: 0
+        } else {
+            0
+        }
         parent.removeAllViews()
         parent.addView(pageTitle("生成字幕中"))
         parent.addView(primaryButton("＋ 添加视频") { pickBatchVideos() }, LinearLayout.LayoutParams.MATCH_PARENT, dp(48))
@@ -662,7 +668,11 @@ class LearningActivity : Activity() {
             tasks.forEach { task -> list.addView(processingTaskCard(task)) }
         }
         scroll.addView(list)
+        processingScrollView = scroll
         parent.addView(scroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+        if (preserveScrollPosition && previousScrollY > 0) {
+            scroll.post { scroll.scrollTo(0, previousScrollY) }
+        }
     }
 
     private fun renderCompletedPage(parent: LinearLayout) {
@@ -845,7 +855,7 @@ class LearningActivity : Activity() {
             row.addView(LinearLayout(this@LearningActivity).apply {
                 orientation = LinearLayout.VERTICAL
                 addView(cardTitle("强哥"))
-                addView(cardMeta("作者：强哥\n版本：${versionName()}\n用真实视频练听力、查单词、复读，并生成中英双语字幕。"))
+                addView(cardMeta("作者：强哥\n版本：${versionName()}\n从真实影像中听见世界，在一词一句的积累里走得更远；愿每一次聆听，都成为理解世界、丰盈自己的微光。"))
             }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
             addView(row)
         }
@@ -1158,7 +1168,7 @@ class LearningActivity : Activity() {
     private fun renderCurrentTaskTab() {
         val content = tabContent ?: return
         when (currentTab) {
-            MainTab.PROCESSING -> renderProcessingPage(content)
+            MainTab.PROCESSING -> renderProcessingPage(content, preserveScrollPosition = true)
             MainTab.COMPLETED -> renderCompletedPage(content)
             MainTab.MINE -> renderMinePage(content)
             MainTab.LEARNING -> Unit
