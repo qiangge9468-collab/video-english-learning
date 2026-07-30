@@ -100,6 +100,7 @@ class LearningActivity : Activity() {
     private var textToSpeechReady = false
     private var textToSpeechInitializing = false
     private var pendingSpeechTerm: String? = null
+    private var pendingSpeechLocale: Locale = Locale.US
     private var pronunciationPlayer: MediaPlayer? = null
     private var englishChineseTranslator: Translator? = null
     private var pendingResumePositionMs = 0
@@ -417,6 +418,10 @@ class LearningActivity : Activity() {
             visibility = View.GONE
         }
         videoFrame.addView(videoPreviewImage, FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
+        val videoTapListener = View.OnClickListener { toggleNormalPlayback() }
+        videoFrame.setOnClickListener(videoTapListener)
+        textureView.setOnClickListener(videoTapListener)
+        videoPreviewImage.setOnClickListener(videoTapListener)
         if (landscape) {
             videoPane.addView(videoFrame, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
         } else {
@@ -1503,28 +1508,70 @@ class LearningActivity : Activity() {
     }
 
     private fun showLookup(term: String) {
-        val result = dictionary.lookupRich(term)
-        saveWordbookEntry(result, currentWordbookContext())
-        val message = buildString {
+        val context = currentWordbookContext()
+        val result = dictionary.lookupRich(term, context.englishText)
+        saveWordbookEntry(result, context)
+
+        val details = buildString {
             if (result.lemma.isNotBlank() && result.lemma != result.term) {
-                append("\u539f\u5f62\uff1a").append(result.lemma).append("\n")
+                append("原形：").append(result.lemma).append("\n")
             }
-            if (result.inflection.isNotBlank()) append("\u8bcd\u5f62\uff1a").append(result.inflection).append("\n")
-            if (result.phonetic.isNotBlank()) append("\u97f3\u6807\uff1a").append(result.phonetic).append("\n\n")
-            append("\u4e2d\u6587\u91ca\u4e49\uff1a\n").append(result.meaning)
+            if (result.inflection.isNotBlank()) append("词形：").append(result.inflection).append("\n")
+            if (result.phonetic.isNotBlank() && result.ukPhonetic.isBlank() && result.usPhonetic.isBlank()) {
+                append("通用音标：/").append(result.phonetic.trim('/')).append("/\n")
+            }
+            append("\n中文释义：\n").append(result.meaning)
             if (result.definition.isNotBlank() && result.definition != result.meaning) {
-                append("\n\n\u82f1\u6587\u91ca\u4e49\uff08\u524d 3 \u6761\uff09\uff1a\n").append(result.definition)
+                append("\n\n英文释义（前 3 条）：\n").append(result.definition)
+            }
+            if (result.collocations.isNotEmpty()) {
+                append("\n\n常用搭配：\n")
+                result.collocations.forEach {
+                    append("• ").append(it.phrase).append("：").append(it.meaning).append("\n")
+                }
+            }
+            if (context.englishText.isNotBlank()) {
+                append("\n本句：\n").append(context.englishText)
+            }
+        }.trim()
+
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(24), dp(4), dp(24), dp(8))
+        }
+        val pronunciationRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        fun pronunciationButton(label: String, phonetic: String, locale: Locale): Button {
+            return Button(this).apply {
+                text = if (phonetic.isBlank()) "$label 发音  🔊" else "$label /${phonetic.trim('/')}/  🔊"
+                isAllCaps = false
+                setOnClickListener { speakTerm(result.term, locale) }
             }
         }
-        val dialog = AlertDialog.Builder(this)
+        pronunciationRow.addView(
+            pronunciationButton("英", result.ukPhonetic, Locale.UK),
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        )
+        pronunciationRow.addView(
+            pronunciationButton("美", result.usPhonetic, Locale.US),
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        )
+        content.addView(pronunciationRow)
+        content.addView(TextView(this).apply {
+            text = details
+            textSize = 17f
+            setTextColor(0xFF263238.toInt())
+            setLineSpacing(0f, 1.12f)
+            setPadding(0, dp(8), 0, dp(8))
+        })
+        val scroll = ScrollView(this).apply { addView(content) }
+        AlertDialog.Builder(this)
             .setTitle(result.term)
-            .setMessage(message)
-            .setNeutralButton("发音", null)
+            .setView(scroll)
             .setPositiveButton("知道了", null)
             .show()
-        dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
-            speakTerm(result.term)
-        }
     }
 
     private fun currentSentenceForWordbook(): String {
@@ -1958,25 +2005,25 @@ class LearningActivity : Activity() {
                 if (textToSpeechReady) {
                     pendingSpeechTerm?.let { term ->
                         pendingSpeechTerm = null
-                        speakTerm(term)
+                        speakTerm(term, pendingSpeechLocale)
                     }
                 } else {
                     pendingSpeechTerm?.let { term ->
                         pendingSpeechTerm = null
-                        playOnlinePronunciation(term)
+                        playOnlinePronunciation(term, pendingSpeechLocale)
                     }
                 }
             } else {
                 textToSpeechReady = false
                 pendingSpeechTerm?.let { term ->
                     pendingSpeechTerm = null
-                    playOnlinePronunciation(term)
+                    playOnlinePronunciation(term, pendingSpeechLocale)
                 }
             }
         }
     }
 
-    private fun speakTerm(term: String) {
+    private fun speakTerm(term: String, locale: Locale = Locale.US) {
         val cleaned = term
             .replace(Regex("[^A-Za-z'\\-\\s]"), " ")
             .replace(Regex("\\s+"), " ")
@@ -1985,22 +2032,33 @@ class LearningActivity : Activity() {
         val speaker = textToSpeech
         if (speaker == null || !textToSpeechReady) {
             pendingSpeechTerm = cleaned
+            pendingSpeechLocale = locale
             if (speaker == null || textToSpeechInitializing) {
                 initTextToSpeech()
                 Toast.makeText(this, "正在准备系统英文发音...", Toast.LENGTH_SHORT).show()
             } else {
                 pendingSpeechTerm = null
-                playOnlinePronunciation(cleaned)
+                playOnlinePronunciation(cleaned, locale)
             }
             return
         }
+        val availability = speaker.setLanguage(locale)
+        if (availability == TextToSpeech.LANG_MISSING_DATA ||
+            availability == TextToSpeech.LANG_NOT_SUPPORTED
+        ) {
+            Toast.makeText(this, "系统未安装${if (locale == Locale.UK) "英式" else "美式"}语音，改用在线发音。", Toast.LENGTH_SHORT).show()
+            playOnlinePronunciation(cleaned, locale)
+            return
+        }
+        speaker.setSpeechRate(0.9f)
         speaker.speak(cleaned, TextToSpeech.QUEUE_FLUSH, null, "lookup-${System.nanoTime()}")
     }
 
-    private fun playOnlinePronunciation(term: String) {
+    private fun playOnlinePronunciation(term: String, locale: Locale = Locale.US) {
         val encoded = URLEncoder.encode(term, Charsets.UTF_8.name())
-        val url = "https://dict.youdao.com/dictvoice?audio=$encoded&type=2"
-        Toast.makeText(this, "正在播放在线单词发音...", Toast.LENGTH_SHORT).show()
+        val voiceType = if (locale == Locale.UK) 1 else 2
+        val url = "https://dict.youdao.com/dictvoice?audio=$encoded&type=$voiceType"
+        Toast.makeText(this, "正在播放${if (locale == Locale.UK) "英式" else "美式"}在线发音...", Toast.LENGTH_SHORT).show()
         pronunciationPlayer?.release()
         pronunciationPlayer = MediaPlayer().apply {
             setDataSource(url)

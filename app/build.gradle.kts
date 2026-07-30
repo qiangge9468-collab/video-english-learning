@@ -20,8 +20,8 @@ android {
         applicationId = "com.codex.videolearnenglish.remote"
         minSdk = 26
         targetSdk = 35
-        versionCode = 25
-        versionName = "2.0.5"
+        versionCode = 26
+        versionName = "2.0.6"
 
         if (enableWhisperNative) {
             ndk {

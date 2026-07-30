@@ -8,17 +8,24 @@ import java.util.Locale
 data class LookupResult(
     val term: String,
     val phonetic: String = "",
+    val ukPhonetic: String = "",
+    val usPhonetic: String = "",
     val meaning: String,
     val definition: String = "",
     val lemma: String = "",
-    val inflection: String = ""
+    val inflection: String = "",
+    val collocations: List<Collocation> = emptyList()
 )
 
 class Dictionary(private val context: Context) {
     private val database: SQLiteDatabase? by lazy { openBundledDatabase() }
+    private val lemmaDatabase: SQLiteDatabase? by lazy {
+        openAssetDatabase("lemma_v2_0_6.db", "lemma_v2_0_6.db")
+    }
 
     fun close() {
         database?.close()
+        lemmaDatabase?.close()
     }
 
     fun lookup(rawText: String): LookupResult {
@@ -41,27 +48,87 @@ class Dictionary(private val context: Context) {
 
         return LookupResult(term, meaning = "本地词典暂未收录。")
     }
-    fun lookupRich(rawText: String): LookupResult {
+    fun lookupRich(rawText: String, sentence: String = ""): LookupResult {
         val term = cleanTerm(rawText)
         if (term.isBlank() || term.contains(' ')) return lookup(rawText)
 
         val exact = lookupDatabase(term)
-        for ((lemma, formLabel) in lemmaCandidates(term)) {
-            val base = lookupDatabase(lemma) ?: continue
+        val lemma = lookupLemma(term)
+            ?: irregularForms[term]?.first
+            ?: if (exact == null) lemmaCandidates(term).firstNotNullOfOrNull { candidate ->
+                candidate.first.takeIf { lookupDatabase(it) != null }
+            } else null
+        val base = lemma?.takeIf { it != term }?.let(::lookupDatabase)
+        val selected = base ?: exact
+        if (selected != null) {
+            val resolvedLemma = base?.term.orEmpty()
+            val enrichment = lookupEnrichment(resolvedLemma.ifBlank { term })
+            val pronunciation = PronunciationLibrary.resolve(
+                term = term,
+                lemma = resolvedLemma,
+                fallback = exact?.phonetic?.takeIf { it.isNotBlank() } ?: selected.phonetic
+            )
             return LookupResult(
                 term = term,
-                phonetic = exact?.phonetic?.takeIf { it.isNotBlank() } ?: base.phonetic,
-                meaning = summarizeMeaning(base.meaning),
-                definition = summarizeDefinition(base.definition),
-                lemma = lemma,
-                inflection = formLabel
+                phonetic = pronunciation.common,
+                ukPhonetic = pronunciation.uk,
+                usPhonetic = pronunciation.us,
+                meaning = summarizeMeaning(selected.meaning),
+                definition = mergeDefinitions(selected.definition, enrichment),
+                lemma = resolvedLemma,
+                inflection = if (resolvedLemma.isNotBlank()) describeInflection(term, resolvedLemma) else "",
+                collocations = PhraseLibrary.collocationsFor(term, resolvedLemma, sentence)
             )
         }
+        return lookup(rawText)
+    }
 
-        return exact?.copy(
-            meaning = summarizeMeaning(exact.meaning),
-            definition = summarizeDefinition(exact.definition)
-        ) ?: lookup(rawText)
+    private fun lookupLemma(word: String): String? {
+        val db = lemmaDatabase ?: return null
+        return db.rawQuery(
+            "SELECT lemma FROM forms WHERE form = ? LIMIT 1",
+            arrayOf(word)
+        ).use { cursor ->
+            if (cursor.moveToFirst()) cursor.getString(0)?.takeIf { it.isNotBlank() } else null
+        }
+    }
+
+    private fun describeInflection(word: String, lemma: String): String = when {
+        word in irregularForms -> irregularForms.getValue(word).second
+        word.endsWith("ing") -> "现在分词或动名词"
+        word.endsWith("ed") || word.endsWith("en") -> "过去式或过去分词"
+        word.endsWith("s") && lemma != word -> "复数或第三人称单数"
+        else -> "词形变化"
+    }
+
+    private fun lookupEnrichment(word: String): LexicalEnrichment? {
+        val db = lemmaDatabase ?: return null
+        return db.rawQuery(
+            "SELECT definitions, related, examples FROM enrichment WHERE word = ? LIMIT 1",
+            arrayOf(word)
+        ).use { cursor ->
+            if (!cursor.moveToFirst()) return@use null
+            LexicalEnrichment(
+                definitions = cursor.getString(0).orEmpty(),
+                related = cursor.getString(1).orEmpty(),
+                examples = cursor.getString(2).orEmpty()
+            )
+        }
+    }
+
+    private fun mergeDefinitions(original: String, enrichment: LexicalEnrichment?): String {
+        val blocks = mutableListOf<String>()
+        summarizeDefinition(original).takeIf { it.isNotBlank() }?.let(blocks::add)
+        enrichment?.definitions?.takeIf { it.isNotBlank() }?.let {
+            blocks += "Open English WordNet：\n$it"
+        }
+        enrichment?.related?.takeIf { it.isNotBlank() }?.let {
+            blocks += "近义／相关词：$it"
+        }
+        enrichment?.examples?.takeIf { it.isNotBlank() }?.let {
+            blocks += "英文例句：\n$it"
+        }
+        return blocks.joinToString("\n\n").take(1200)
     }
 
     private fun lemmaCandidates(word: String): List<Pair<String, String>> {
@@ -191,12 +258,14 @@ class Dictionary(private val context: Context) {
 
 
 
-    private fun openBundledDatabase(): SQLiteDatabase? {
-        val dbName = "dictionary.db"
-        val dbFile = File(context.filesDir, dbName)
+    private fun openBundledDatabase(): SQLiteDatabase? =
+        openAssetDatabase("dictionary.db", "dictionary.db")
+
+    private fun openAssetDatabase(assetName: String, targetName: String): SQLiteDatabase? {
+        val dbFile = File(context.filesDir, targetName)
         return runCatching {
             if (!dbFile.exists() || dbFile.length() == 0L) {
-                context.assets.open(dbName).use { input ->
+                context.assets.open(assetName).use { input ->
                     dbFile.outputStream().use { output -> input.copyTo(output) }
                 }
             }
@@ -327,6 +396,83 @@ object PhraseLibrary {
         "come across" to "偶然遇到；给人……印象"
     )
 
+    private val collocations = mapOf(
+        "end" to listOf(
+            "the end of ..." to "……的最后／末尾",
+            "in the end" to "终于；最后（强调结果）",
+            "at the end of ..." to "在……末尾／尽头",
+            "by the end of ..." to "到……结束时为止",
+            "end up doing ..." to "最终做了……",
+            "put an end to ..." to "结束；终止……"
+        ),
+        "suppose" to listOf(
+            "be supposed to do ..." to "应该做……；按理应当……",
+            "suppose that ..." to "假设／认为……",
+            "I suppose so" to "我想是的",
+            "what's that supposed to mean?" to "那是什么意思？"
+        ),
+        "progress" to listOf(
+            "make progress" to "取得进步",
+            "in progress" to "正在进行中",
+            "progress toward(s) ..." to "朝着……推进",
+            "slow and steady progress" to "缓慢而稳步的进展"
+        ),
+        "cross" to listOf(
+            "cross the road" to "过马路",
+            "cross the line" to "越界；做得过分",
+            "cross over" to "穿过；转入另一领域",
+            "cross one's mind" to "闪过某人的脑海"
+        ),
+        "take" to listOf(
+            "take a look" to "看一看",
+            "take part in ..." to "参加……",
+            "take care of ..." to "照顾；处理……",
+            "take place" to "发生；举行"
+        ),
+        "get" to listOf(
+            "get ready" to "准备好",
+            "get used to ..." to "习惯于……",
+            "get along with ..." to "与……相处",
+            "get back" to "回来；取回"
+        ),
+        "make" to listOf(
+            "make sure" to "确保",
+            "make sense" to "有道理；讲得通",
+            "make a difference" to "产生影响；带来改变",
+            "make up one's mind" to "下定决心"
+        ),
+        "look" to listOf(
+            "look for ..." to "寻找……",
+            "look forward to ..." to "期待……",
+            "look after ..." to "照顾……",
+            "look up ..." to "查找；查阅……"
+        ),
+        "go" to listOf(
+            "go on" to "继续；发生",
+            "go through ..." to "经历；仔细检查……",
+            "go ahead" to "继续；请便",
+            "go back" to "回去；追溯到"
+        ),
+        "come" to listOf(
+            "come across ..." to "偶然遇到……",
+            "come up with ..." to "想出……",
+            "come back" to "回来",
+            "come true" to "实现；成真"
+        ),
+        "work" to listOf(
+            "work out" to "解决；锻炼；进展顺利",
+            "work on ..." to "致力于；继续改进……",
+            "at work" to "在工作；起作用",
+            "work with ..." to "与……合作；使用……"
+        ),
+        "learn" to listOf(
+            "learn from ..." to "向……学习；从……吸取经验",
+            "learn how to ..." to "学习如何……",
+            "learn by doing" to "在实践中学习",
+            "learn one's lesson" to "吸取教训"
+        )
+    )
+
     fun lookup(term: String): LookupResult? {
         val meaning = phrases[term] ?: return null
         return LookupResult(term = term, meaning = meaning)
@@ -345,6 +491,53 @@ object PhraseLibrary {
             }
             .sortedWith(compareByDescending<PhraseSpan> { it.end - it.start }.thenBy { it.start })
     }
+
+    fun collocationsFor(term: String, lemma: String, sentence: String): List<Collocation> {
+        val key = lemma.ifBlank { term }
+        val result = linkedSetOf<Collocation>()
+        collocations[key].orEmpty().forEach { (phrase, meaning) ->
+            result += Collocation(phrase, meaning)
+        }
+        val normalizedSentence = sentence.lowercase(Locale.US)
+        phrases.forEach { (phrase, meaning) ->
+            if (normalizedSentence.contains(phrase) &&
+                Regex("\\b${Regex.escape(key)}\\b").containsMatchIn(phrase)
+            ) {
+                result += Collocation(phrase, meaning)
+            }
+        }
+        return result.take(6)
+    }
 }
 
 data class PhraseSpan(val start: Int, val end: Int, val phrase: String)
+data class Collocation(val phrase: String, val meaning: String)
+
+private data class Pronunciation(val common: String, val uk: String, val us: String)
+
+private object PronunciationLibrary {
+    private val entries = mapOf(
+        "suppose" to Pronunciation("", "səˈpəʊz", "səˈpoʊz"),
+        "supposed" to Pronunciation("", "səˈpəʊzd", "səˈpoʊzd"),
+        "progress" to Pronunciation("", "ˈprəʊɡres", "ˈprɑːɡres"),
+        "cross" to Pronunciation("", "krɒs", "krɔːs"),
+        "end" to Pronunciation("", "end", "end"),
+        "ended" to Pronunciation("", "ˈendɪd", "ˈendɪd"),
+        "schedule" to Pronunciation("", "ˈʃedjuːl", "ˈskedʒuːl"),
+        "tomato" to Pronunciation("", "təˈmɑːtəʊ", "təˈmeɪtoʊ"),
+        "either" to Pronunciation("", "ˈaɪðə", "ˈiːðər"),
+        "route" to Pronunciation("", "ruːt", "ruːt")
+    )
+
+    fun resolve(term: String, lemma: String, fallback: String): Pronunciation {
+        val known = entries[term] ?: entries[lemma]
+        return if (known != null) known.copy(common = fallback)
+        else Pronunciation(common = fallback, uk = "", us = "")
+    }
+}
+
+private data class LexicalEnrichment(
+    val definitions: String,
+    val related: String,
+    val examples: String
+)

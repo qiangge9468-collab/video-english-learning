@@ -47,6 +47,19 @@ v2.0.5 新增随电脑服务自动打开的本地网页仪表盘，可以直接�
 
 ## 版本说明
 
+### v2.0.6
+
+v2.0.6 是当前推荐手机端版本，电脑端协议没有变化，继续配套 v2.0.5 电脑服务。
+
+- 修复简单去后缀导致的错查：使用 ECDICT 官方词形表处理约 10.2 万个变形，`supposed`、`ended` 等会回到正确原形；已有精确词条优先，不再把 `progress`、`cross` 错查成冷僻词。
+- 保留 ECDICT 中文释义，并加入约 2.0 万个高频词的 Open English WordNet 2025 精选英文释义、相关词和英文例句。
+- 查询结果显示原形、词形、中文/英文释义、相关词、当前视频原句和常用搭配；例如查询 `ended` 会显示 `the end of ...`、`in the end`、`at the end of ...` 等搭配。
+- 弹窗顶部提供可点击的“英式发音”和“美式发音”；优先使用系统对应地区 TTS，未安装相应语音时自动回退在线发音。
+- 点击视频画面任意位置即可播放或暂停，原有“播放”按钮继续保留。
+- APK 版本升级为 2.0.6，旧版 APK 全部保留；安装包位置：`release/app-v2.0.6.apk`。
+
+词汇数据说明见 `THIRD_PARTY_LEXICAL_DATA.md`。为控制 APK 体积，本版没有打包 Kaikki/Wiktionary 和 Tatoeba 全量数据；常用搭配由项目维护，双语语境直接使用当前视频字幕。
+
 ### v2.0.5
 
 v2.0.5 是当前推荐版本，在保留 v2.0.4 字幕断句、语音空洞修复、翻译完整性和后台队列能力的基础上，新增独立的电脑端本地网页仪表盘。
@@ -161,7 +174,8 @@ v1.0.0 是早期版本，功能集中在单个学习页面里。
 | `release/app-v2.0.2.apk` | `tools/versions/v2.0.2/start_service.ps1` | `tools/versions/v2.0.2/service.py` | 支持断点上传、电脑持久化任务、音频/字幕缓存复用和离线进度恢复 |
 | `release/app-v2.0.3.apk` | `tools/versions/v2.0.3/start_service.ps1` | `tools/versions/v2.0.3/service.py` | 增加 SaT + spaCy 语义断句，并保留持久上传和 FIFO 队列 |
 | `release/app-v2.0.4.apk` | `tools/versions/v2.0.4/start_service.ps1` | `tools/versions/v2.0.4/service.py` | 增加运行中新增视频优先上传、连续后台锁、0.05 秒时间微调，以及服务重启后的地址/token 自动刷新 |
-| `release/app-v2.0.5.apk` | `tools/versions/v2.0.5/start_service.ps1` | `tools/versions/v2.0.5/service.py` | 当前推荐组合；完整保留 v2.0.4 能力，并新增自动打开的本地网页仪表盘 |
+| `release/app-v2.0.5.apk` | `tools/versions/v2.0.5/start_service.ps1` | `tools/versions/v2.0.5/service.py` | 保留版本；完整保留 v2.0.4 能力，并新增自动打开的本地网页仪表盘 |
+| `release/app-v2.0.6.apk` | `tools/versions/v2.0.5/start_service.ps1` | `tools/versions/v2.0.5/service.py` | 当前推荐组合；手机端升级词典、英美发音和视频画面点按播放/暂停，电脑端协议不变 |
 
 升级电脑端版本时，请先等待旧电脑端队列结束并按 `Ctrl + C` 关闭旧服务，再安装对应 APK，最后运行同版本启动脚本。旧 APK、启动脚本和服务源码都可以继续保留，但两个服务不能同时占用默认的 8766 端口。
 
@@ -228,6 +242,7 @@ USB/模拟器 -> 局域网 -> 公网 Cloudflare Tunnel
 
 常用操作：
 
+- 点击视频画面：在正常播放与暂停之间切换。
 - “播放”：播放当前句。
 - “上一句 / 下一句”：按字幕句子跳转。
 - “单次 / 循环”：控制当前句播放一次还是循环播放。
@@ -241,7 +256,9 @@ USB/模拟器 -> 局域网 -> 公网 Cloudflare Tunnel
 
 ### 第五步：查词和复习
 
-学习时点击当前英文句子里的单词，可以查看释义和发音。查过的单词会自动进入“我的 -> 单词本”。
+学习时点击当前英文句子里的单词，可以查看正确原形、词形、中文释义、WordNet 英文释义与相关词、当前原句和常用搭配。弹窗顶部的英式/美式音标或发音按钮可以直接播放对应口音。查过的单词会自动进入“我的 -> 单词本”。
+
+v2.0.6 的离线查询主层是 ECDICT 中文词典与官方词形表，补充层是 Open English WordNet 2025 高频精选数据。Kaikki/Wiktionary 与 Tatoeba 全量库没有直接塞入 APK，以避免安装包超过 GitHub 单文件限制；当前句本身就是最贴近学习内容的双语例句。
 
 单词本按日期整理，例句来自视频原句。点击例句可以回到对应视频位置，适合用真实语境复习单词。
 
@@ -532,7 +549,7 @@ README.md                    项目说明
 
 项目开源在 GitHub。用户可以通过“我的 -> GitHub”打开项目主页，查看说明、下载新版 APK、反馈问题或参与改进。
 
-如果你只是安装使用，推荐下载 `release/app-v2.0.5.apk`，并配套运行 v2.0.5 电脑服务。如果你想自己改代码，可以 clone 项目后用 Android Studio 打开。
+如果你只是安装使用，推荐下载 `release/app-v2.0.6.apk`，并配套运行 v2.0.5 电脑服务。如果你想自己改代码，可以 clone 项目后用 Android Studio 打开。
 
 ## 作者
 
