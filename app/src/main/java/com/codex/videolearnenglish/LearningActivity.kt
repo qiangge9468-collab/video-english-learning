@@ -625,7 +625,11 @@ class LearningActivity : Activity() {
             }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT))
             setOnClickListener {
                 if (currentTab == tab) return@setOnClickListener
-                saveLearningState()
+                if (currentTab == MainTab.LEARNING) {
+                    retainLearningPlaybackForTabSwitch()
+                } else {
+                    saveLearningState()
+                }
                 currentTab = tab
                 buildUi()
             }
@@ -2123,6 +2127,25 @@ class LearningActivity : Activity() {
         if (now - lastProgressSaveAtMs >= 3_000L) {
             saveLearningState()
             lastProgressSaveAtMs = now
+        }
+    }
+
+    private fun retainLearningPlaybackForTabSwitch() {
+        val player = mediaPlayer
+        val currentPosition = player?.let {
+            runCatching { it.currentPosition }.getOrNull()
+        }
+        pendingResumePositionMs = retainedPlaybackPosition(
+            currentPositionMs = currentPosition,
+            pendingResumePositionMs = pendingResumePositionMs
+        )
+        pendingStartAfterSeek = false
+        if (player != null && runCatching { player.isPlaying }.getOrDefault(false)) {
+            player.pause()
+        }
+        if (playingWordbookExample || pendingWordbookExample != null) return
+        currentVideoUri?.let { uri ->
+            saveLearningState(uri, pendingResumePositionMs, selectedIndex, normalPlayback)
         }
     }
 
