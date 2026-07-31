@@ -4,19 +4,21 @@
 
 ## 当前推荐版本
 
-日常使用 v2.0.5：
+日常使用 v2.0.6：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File tools/versions/v2.0.5/start_service.ps1
+powershell -ExecutionPolicy Bypass -File tools/versions/v2.0.6/start_service.ps1
 ```
 
-v2.0.5 文件：
+v2.0.6 文件：
 
-- `versions/v2.0.5/service.py`：Whisper、语义断句、翻译、持久队列和仪表盘 API。
-- `versions/v2.0.5/start_service.ps1`：一键启动；服务就绪后自动打开本地仪表盘。
-- `versions/v2.0.5/durable_job_store.py`：断点上传、任务和字幕缓存。
-- `versions/v2.0.5/semantic_worker.py`：隔离运行的 SaT + spaCy 进程。
-- `versions/v2.0.5/dashboard.html`：本地只读网页仪表盘。
+- `versions/v2.0.6/service.py`：Whisper、WhisperX CUDA 对齐、语义断句、翻译、持久队列和仪表盘 API。
+- `versions/v2.0.6/install_whisperx_cuda.ps1`：创建独立 Python 3.11/CUDA 环境并缓存英文对齐模型。
+- `versions/v2.0.6/whisperx_worker.py`：隔离运行 WhisperX 3.8.6 强制对齐。
+- `versions/v2.0.6/start_service.ps1`：一键启动；服务就绪后自动打开本地仪表盘。
+- `versions/v2.0.6/durable_job_store.py`：断点上传、任务和字幕缓存。
+- `versions/v2.0.6/semantic_worker.py`：隔离运行的 SaT + spaCy 进程。
+- `versions/v2.0.6/dashboard.html`：本地只读网页仪表盘。
 
 ## 目录结构
 
@@ -27,7 +29,8 @@ tools/
     v2.0.2/        断点上传和持久任务版本
     v2.0.3/        语义断句版本
     v2.0.4/        字幕空洞和翻译修复版本
-    v2.0.5/        当前仪表盘版本
+    v2.0.5/        保留的仪表盘版本
+    v2.0.6/        当前 WhisperX CUDA 对齐和断句质量版本
   shared/          多个版本共用的代码
   network/         局域网、公网和 Cloudflare 工具
   tests/

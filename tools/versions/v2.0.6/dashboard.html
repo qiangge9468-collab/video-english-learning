@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>看视频学英语 · 电脑端仪表盘</title>
+  <style>
+    :root{color-scheme:dark;--bg:#081119;--panel:#101c26;--panel2:#142431;--line:#263b48;--text:#eef7f7;--muted:#8fa7b3;--teal:#38d2c3;--teal2:#92f2e8;--amber:#ffca70;--red:#ff7b7b;--green:#6ee7a5}
+    *{box-sizing:border-box}
+    body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 Inter,"Microsoft YaHei",system-ui,sans-serif}
+    button{font:inherit}
+    .shell{max-width:1480px;margin:auto;padding:28px}
+    .top{display:flex;align-items:flex-end;justify-content:space-between;gap:20px;margin-bottom:22px}
+    .eyebrow{color:var(--teal);font-weight:700;letter-spacing:.12em;text-transform:uppercase;font-size:12px}
+    h1{font-size:clamp(27px,4vw,46px);line-height:1.08;margin:6px 0 4px;letter-spacing:-.035em}
+    .sub{color:var(--muted)}
+    .live{display:flex;align-items:center;gap:9px;color:var(--muted);white-space:nowrap}
+    .dot{width:10px;height:10px;border-radius:50%;background:var(--amber);box-shadow:0 0 0 5px #ffca7018}
+    .dot.ok{background:var(--green);box-shadow:0 0 0 5px #6ee7a518}
+    .grid{display:grid;grid-template-columns:minmax(0,1.65fr) minmax(330px,.75fr);gap:18px}
+    .stack{display:grid;gap:18px}
+    .panel{background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:20px;box-shadow:0 18px 50px #0003}
+    .hero{padding:26px}
+    .panel-head{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:16px}
+    .panel h2{font-size:16px;margin:0;letter-spacing:.02em}
+    .badges{display:flex;flex-wrap:wrap;gap:8px}
+    .badge{border:1px solid var(--line);background:var(--panel2);border-radius:999px;padding:5px 10px;color:var(--muted);font-size:12px}
+    .badge.active{color:var(--teal2);border-color:#38d2c366}
+    .badge.error{color:#ffc0c0;border-color:#ff7b7b66}
+    .video{font-size:clamp(23px,3vw,36px);line-height:1.2;margin:8px 0 14px;letter-spacing:-.02em;overflow-wrap:anywhere}
+    .message{color:var(--muted);min-height:24px}
+    .progress{height:12px;background:#071016;border:1px solid var(--line);border-radius:999px;overflow:hidden;margin:20px 0 9px}
+    .bar{height:100%;width:0;background:var(--teal);transition:width .45s ease}
+    .progress-row{display:flex;justify-content:space-between;color:var(--muted);font-variant-numeric:tabular-nums}
+    .metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-top:22px}
+    .metric{background:var(--panel2);border:1px solid var(--line);border-radius:13px;padding:13px}
+    .metric .label{color:var(--muted);font-size:12px}
+    .metric .value{font-size:18px;margin-top:4px;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+    .queue{display:grid;gap:10px}
+    .job{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:12px;align-items:center;padding:13px;background:var(--panel2);border:1px solid var(--line);border-radius:13px}
+    .position{display:grid;place-items:center;width:34px;height:34px;border-radius:10px;background:#071016;color:var(--teal2);font-weight:800}
+    .job-title{font-weight:650;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .job-meta,.empty{color:var(--muted);font-size:12px}
+    .job-status{font-size:12px;color:var(--muted);text-align:right}
+    .two{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+    .kv{display:grid;grid-template-columns:minmax(105px,.65fr) 1fr;gap:10px 14px;padding:10px 0;border-bottom:1px solid var(--line)}
+    .kv:last-child{border-bottom:0}
+    .key{color:var(--muted)}
+    .value{overflow-wrap:anywhere}
+    .gpu-big{font-size:28px;font-weight:750;margin:4px 0 16px}
+    .gpu-bars{display:grid;gap:12px}
+    .mini-label{display:flex;justify-content:space-between;color:var(--muted);font-size:12px;margin-bottom:5px}
+    .mini-progress{height:7px;background:#071016;border-radius:99px;overflow:hidden}
+    .mini-progress i{display:block;height:100%;background:var(--teal);width:0}
+    .url{display:grid;grid-template-columns:74px minmax(0,1fr) auto;gap:10px;align-items:center;padding:10px 0;border-bottom:1px solid var(--line)}
+    .url:last-child{border-bottom:0}
+    .url code{color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .copy{border:1px solid var(--line);background:var(--panel2);color:var(--text);padding:6px 9px;border-radius:8px;cursor:pointer}
+    .copy:hover{border-color:var(--teal);color:var(--teal2)}
+    .recent{display:grid;gap:8px}
+    .recent-row{display:grid;grid-template-columns:minmax(0,1fr) 90px 64px;gap:10px;padding:10px 0;border-bottom:1px solid var(--line)}
+    .recent-row:last-child{border-bottom:0}
+    .truncate{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .error-text{color:#ffc0c0}
+    .footer{color:var(--muted);font-size:12px;text-align:center;margin-top:20px}
+    @media(max-width:980px){.grid,.two{grid-template-columns:1fr}.metrics{grid-template-columns:1fr 1fr}.top{align-items:flex-start;flex-direction:column}.shell{padding:18px}}
+    @media(max-width:560px){.metrics{grid-template-columns:1fr 1fr}.hero,.panel{padding:16px}.job{grid-template-columns:auto minmax(0,1fr)}.job-status{grid-column:2;text-align:left}.url{grid-template-columns:58px minmax(0,1fr)}.copy{grid-column:2;justify-self:start}}
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header class="top">
+      <div>
+        <div class="eyebrow">Video English Learning · Local Runtime</div>
+        <h1>电脑端处理仪表盘</h1>
+        <div class="sub">字幕识别、语义断句、翻译与持久化队列一览</div>
+      </div>
+      <div class="live"><span id="liveDot" class="dot"></span><span id="liveText">正在连接服务…</span></div>
+    </header>
+    <div class="grid">
+      <section class="stack">
+        <article class="panel hero">
+          <div class="panel-head"><h2>当前任务</h2><div class="badges"><span id="statusBadge" class="badge">等待</span><span id="stageBadge" class="badge">idle</span></div></div>
+          <div id="videoTitle" class="video">等待手机提交视频</div>
+          <div id="message" class="message">服务启动后，任务会自动出现在这里。</div>
+          <div class="progress"><div id="progressBar" class="bar"></div></div>
+          <div class="progress-row"><span id="progressText">0%</span><span id="timeText">--:-- / --:--</span></div>
+          <div class="metrics">
+            <div class="metric"><div class="label">预计剩余</div><div id="eta" class="value">—</div></div>
+            <div class="metric"><div class="label">队列等待</div><div id="queueCount" class="value">0</div></div>
+            <div class="metric"><div class="label">字幕 / 翻译</div><div id="captionMetric" class="value">0 / 0</div></div>
+            <div class="metric"><div class="label">任务 ID</div><div id="jobId" class="value">—</div></div>
+          </div>
+        </article>
+        <div class="two">
+          <article class="panel"><div class="panel-head"><h2>等待队列</h2><span id="queueBadge" class="badge">0 个</span></div><div id="queue" class="queue"><div class="empty">当前没有等待任务</div></div></article>
+          <article class="panel"><div class="panel-head"><h2>最近任务</h2><span class="badge">最新 8 个</span></div><div id="recent" class="recent"><div class="empty">暂无历史任务</div></div></article>
+        </div>
+      </section>
+      <aside class="stack">
+        <article class="panel">
+          <div class="panel-head"><h2>GPU</h2><span id="gpuState" class="badge">检测中</span></div>
+          <div id="gpuName" class="gpu-big">NVIDIA GPU</div>
+          <div class="gpu-bars">
+            <div><div class="mini-label"><span>利用率</span><span id="gpuUtilText">—</span></div><div class="mini-progress"><i id="gpuUtil"></i></div></div>
+            <div><div class="mini-label"><span>显存</span><span id="gpuMemText">—</span></div><div class="mini-progress"><i id="gpuMem"></i></div></div>
+          </div>
+          <div class="kv"><span class="key">温度</span><span id="gpuTemp" class="value">—</span></div>
+        </article>
+        <article class="panel">
+          <div class="panel-head"><h2>模型与服务</h2><span id="version" class="badge active">v2.0.6</span></div>
+          <div class="kv"><span class="key">Whisper</span><span id="whisper" class="value">—</span></div>
+          <div class="kv"><span class="key">词级对齐</span><span id="alignment" class="value">—</span></div>
+          <div class="kv"><span class="key">语义断句</span><span id="segmenter" class="value">—</span></div>
+          <div class="kv"><span class="key">中文翻译</span><span id="translation" class="value">—</span></div>
+          <div class="kv"><span class="key">语言</span><span id="language" class="value">—</span></div>
+          <div class="kv"><span class="key">数据目录</span><span id="dataDir" class="value">—</span></div>
+        </article>
+        <article class="panel">
+          <div class="panel-head"><h2>连接地址</h2><span class="badge">只读</span></div>
+          <div id="urls"><div class="empty">正在读取地址…</div></div>
+        </article>
+      </aside>
+    </div>
+    <div id="footer" class="footer">页面每 2 秒自动刷新 · 关闭网页不会停止电脑任务</div>
+  </main>
+  <script>
+    const q = new URLSearchParams(location.search), token = q.get("token") || "";
+    const $ = id => document.getElementById(id);
+    const esc = value => String(value ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+    const fmtTime = s => {s=Number(s)||0; return `${Math.floor(s/60).toString().padStart(2,"0")}:${Math.floor(s%60).toString().padStart(2,"0")}`};
+    const fmtDate = ts => ts ? new Date(ts*1000).toLocaleString("zh-CN",{hour12:false}) : "—";
+    const stageNames={idle:"空闲",queued:"排队",starting:"准备",detecting:"语言检测",loading:"加载模型",transcribing:"字幕识别",postprocessing:"语义断句",translating:"中文翻译",done:"完成",error:"错误"};
+    function setText(id,v){$(id).textContent=v}
+    function badge(id,text,error=false){const el=$(id);el.textContent=text;el.className=`badge ${error?"error":"active"}`}
+    function renderJobs(id,jobs,queued=false){
+      const root=$(id);
+      if(!jobs?.length){root.innerHTML=`<div class="empty">${queued?"当前没有等待任务":"暂无历史任务"}</div>`;return}
+      root.innerHTML=jobs.map((j,i)=>queued
+        ? `<div class="job"><div class="position">${esc(j.queue_position||i+1)}</div><div><div class="job-title" title="${esc(j.video_title||"未命名视频")}">${esc(j.video_title||"未命名视频")}</div><div class="job-meta">${esc(j.mode==="retranslate"?"仅重翻中文":"生成字幕并翻译")} · ${fmtDate(j.created_at)}</div></div><div class="job-status">${esc(j.progress||0)}%</div></div>`
+        : `<div class="recent-row"><div><div class="truncate" title="${esc(j.video_title||"未命名视频")}">${esc(j.video_title||"未命名视频")}</div><div class="job-meta ${j.status==="error"?"error-text":""}">${esc(j.error||j.message||"")}</div></div><div class="job-meta">${fmtDate(j.updated_at)}</div><div class="${j.status==="error"?"error-text":""}">${esc(stageNames[j.status]||j.status)}</div></div>`
+      ).join("");
+    }
+    function renderUrls(config){
+      const urls=[];
+      const all=config?.transcribe_urls||[];
+      if(all[0]) urls.push(["USB",all[0]]);
+      (config?.lan_urls||[]).forEach(u=>urls.push(["局域网",u]));
+      if(config?.public_url) urls.push(["公网",config.public_url]);
+      $("urls").innerHTML=urls.length?urls.map(([label,url],i)=>`<div class="url"><span>${esc(label)}</span><code title="${esc(url)}">${esc(url.replace(/token=[^&]+/,"token=••••••••"))}</code><button class="copy" data-index="${i}">复制</button></div>`).join(""):`<div class="empty">暂无可用地址</div>`;
+      $("urls").querySelectorAll(".copy").forEach((b,i)=>b.onclick=async()=>{await navigator.clipboard.writeText(urls[i][1]);b.textContent="已复制";setTimeout(()=>b.textContent="复制",1200)});
+    }
+    function render(data){
+      const s=data.service||{}, j=data.current_job||{}, gpu=data.system?.gpu||{};
+      $("liveDot").className="dot ok"; setText("liveText",`服务在线 · ${data.server_time||""}`);
+      setText("videoTitle",j.video_title||s.video_title||"等待手机提交视频");
+      setText("message",j.message||s.message||"Waiting for a phone request");
+      const progress=Number(j.progress??s.progress??0); $("progressBar").style.width=`${Math.max(0,Math.min(100,progress))}%`; setText("progressText",`${progress}%`);
+      setText("timeText",`${fmtTime(j.processed_seconds)} / ${fmtTime(j.total_seconds)}`);
+      setText("eta",data.eta_seconds==null?"—":fmtTime(data.eta_seconds));
+      setText("queueCount",data.counts?.queued||0); setText("queueBadge",`${data.counts?.queued||0} 个`);
+      setText("captionMetric",`${s.subtitle_count||0} / ${s.translation_done||0}`);
+      setText("jobId",(j.job_id||s.current_job_id||"—").slice(0,8));
+      badge("statusBadge",stageNames[j.status||s.job_status]||j.status||s.job_status||"等待",(j.status||s.job_status)==="error");
+      badge("stageBadge",stageNames[j.stage||s.stage]||j.stage||s.stage||"idle",(j.stage||s.stage)==="error");
+      renderJobs("queue",data.queue,true); renderJobs("recent",data.recent,false);
+      setText("version",`v${s.service_version||data.config?.service_version||"2.0.6"}`);
+      setText("whisper",`${s.subtitle_model||s.configured_english_model||"—"} · ${s.whisper_device||s.configured_whisper_device||"auto"}`);
+      setText("alignment",`${data.config?.alignment?.name||"—"} · ${data.config?.alignment?.device||"—"}${data.config?.alignment?.required?" · 必需":""}`);
+      setText("segmenter",`${data.config?.segmenter?.name||"—"} · ${data.config?.segmenter?.enabled?"启用":"回退规则"}`);
+      setText("translation",`${s.translation_model||"—"} · ${s.translation_device||"auto"}`);
+      setText("language",s.detected_language||"unknown"); setText("dataDir",s.service_data_dir||"—");
+      if(gpu.available){
+        badge("gpuState","运行正常");setText("gpuName",gpu.name||"NVIDIA GPU");
+        $("gpuUtil").style.width=`${gpu.utilization_percent||0}%`;setText("gpuUtilText",`${gpu.utilization_percent||0}%`);
+        const mp=gpu.memory_total_mb?Math.round(gpu.memory_used_mb/gpu.memory_total_mb*100):0;$("gpuMem").style.width=`${mp}%`;setText("gpuMemText",`${gpu.memory_used_mb||0} / ${gpu.memory_total_mb||0} MB`);setText("gpuTemp",`${gpu.temperature_c||0} °C`);
+      }else{badge("gpuState","不可用",true);setText("gpuName","未读取到 GPU");setText("gpuTemp",gpu.error||"—")}
+      renderUrls(data.config||{});setText("footer",`页面每 2 秒自动刷新 · 关闭网页不会停止电脑任务 · ${data.counts?.total||0} 个持久化任务`);
+    }
+    async function refresh(){
+      try{const url="/api/dashboard"+(token?`?token=${encodeURIComponent(token)}`:"");const r=await fetch(url,{cache:"no-store"});if(!r.ok)throw new Error(`${r.status} ${r.statusText}`);render(await r.json())}
+      catch(e){$("liveDot").className="dot";setText("liveText",`连接失败：${e.message}`)}
+    }
+    refresh();setInterval(refresh,2000);
+  </script>
+</body>
+</html>
