@@ -426,8 +426,9 @@ class CaptionGenerationService : Service() {
     }
 
     private fun githubDiscoveredServiceUrl(knownUrls: Collection<String>): String? {
-        val discoveryUrl = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
-            .getString(SERVICE_CONFIG_GITHUB_URL_KEY, null).orEmpty().trim()
+        val savedDiscoveryUrl = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+            .getString(SERVICE_CONFIG_GITHUB_URL_KEY, null)
+        val discoveryUrl = ServicePairingConfig.preferredDiscoveryUrl(savedDiscoveryUrl)
         if (!ServicePairingConfig.isAllowedDiscoveryUrl(discoveryUrl)) return null
         val separator = if (discoveryUrl.contains('?')) '&' else '?'
         val fetchUrl = "$discoveryUrl${separator}t=${System.currentTimeMillis()}"
