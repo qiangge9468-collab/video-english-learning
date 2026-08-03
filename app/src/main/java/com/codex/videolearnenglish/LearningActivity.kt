@@ -46,6 +46,10 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.recyclerview.widget.DiffUtil
+import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.ListAdapter
+import androidx.recyclerview.widget.RecyclerView
 import com.google.mlkit.common.model.DownloadConditions
 import com.google.mlkit.nl.translate.TranslateLanguage
 import com.google.mlkit.nl.translate.Translation
@@ -131,7 +135,9 @@ class LearningActivity : Activity() {
     private var currentTab = MainTab.LEARNING
     private var lastTaskTabRenderAtMs = 0L
     private var taskTabRenderScheduled = false
-    private var processingScrollView: ScrollView? = null
+    private var processingTaskAdapter: ProcessingTaskAdapter? = null
+    private var processingTaskList: RecyclerView? = null
+    private var processingEmptyView: View? = null
 
     private val pickVideoRequest = 81
     private val pickSubtitleRequest = 82
@@ -652,6 +658,11 @@ class LearningActivity : Activity() {
     }
 
     private fun buildTabPage(tab: MainTab) {
+        if (tab != MainTab.PROCESSING) {
+            processingTaskAdapter = null
+            processingTaskList = null
+            processingEmptyView = null
+        }
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(0xFFF7F8F5.toInt())
@@ -672,31 +683,32 @@ class LearningActivity : Activity() {
         setContentView(root)
     }
 
-    private fun renderProcessingPage(parent: LinearLayout, preserveScrollPosition: Boolean = false) {
-        val previousScrollY = if (preserveScrollPosition) {
-            processingScrollView?.scrollY ?: 0
-        } else {
-            0
-        }
+    private fun renderProcessingPage(parent: LinearLayout) {
         parent.removeAllViews()
         parent.addView(pageTitle("生成字幕中"))
         parent.addView(primaryButton("＋ 添加视频") { pickBatchVideos() }, LinearLayout.LayoutParams.MATCH_PARENT, dp(48))
-        val tasks = CaptionTaskStore.all(this).filter {
-            it.status == CaptionTaskStatus.QUEUED || it.status == CaptionTaskStatus.RUNNING || it.status == CaptionTaskStatus.PAUSED || it.status == CaptionTaskStatus.FAILED
-        }.sortedByDescending { it.updatedAt }
-        val scroll = ScrollView(this)
-        val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        if (tasks.isEmpty()) {
-            list.addView(illustratedEmptyState("还没有生成中的任务。\n点“添加视频”可以一次选择多个视频生成英文字幕和中文翻译。"))
-        } else {
-            tasks.forEach { task -> list.addView(processingTaskCard(task)) }
+        val page = FrameLayout(this)
+        val adapter = ProcessingTaskAdapter().also { processingTaskAdapter = it }
+        val list = RecyclerView(this).apply {
+            layoutManager = LinearLayoutManager(this@LearningActivity)
+            itemAnimator = null
+            setHasFixedSize(false)
+            this.adapter = adapter
         }
-        scroll.addView(list)
-        processingScrollView = scroll
-        parent.addView(scroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
-        if (preserveScrollPosition && previousScrollY > 0) {
-            scroll.post { scroll.scrollTo(0, previousScrollY) }
-        }
+        val empty = illustratedEmptyState("还没有生成中的任务。\n点“添加视频”可以一次选择多个视频生成英文字幕和中文翻译。")
+        page.addView(list, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+        page.addView(empty, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+        processingTaskList = list
+        processingEmptyView = empty
+        parent.addView(page, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+        refreshProcessingTasks()
+    }
+
+    private fun refreshProcessingTasks() {
+        val tasks = ProcessingTaskListPolicy.visibleTasks(CaptionTaskStore.all(this))
+        processingTaskAdapter?.submitList(tasks)
+        processingTaskList?.visibility = if (tasks.isEmpty()) View.GONE else View.VISIBLE
+        processingEmptyView?.visibility = if (tasks.isEmpty()) View.VISIBLE else View.GONE
     }
 
     private fun renderCompletedPage(parent: LinearLayout) {
@@ -746,53 +758,115 @@ class LearningActivity : Activity() {
         parent.addView(scroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
     }
 
-    private fun processingTaskCard(task: CaptionTask): View {
-        val card = taskCard()
-        val top = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
+    private inner class ProcessingTaskAdapter : ListAdapter<CaptionTask, ProcessingTaskViewHolder>(PROCESSING_TASK_DIFF) {
+        init {
+            setHasStableIds(true)
         }
-        top.addView(videoThumbnail(task.uri), LinearLayout.LayoutParams(dp(92), dp(70)))
-        val info = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(12, 0, 0, 0)
+
+        override fun getItemId(position: Int): Long = getItem(position).id.hashCode().toLong()
+
+        override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): ProcessingTaskViewHolder =
+            ProcessingTaskViewHolder()
+
+        override fun onBindViewHolder(holder: ProcessingTaskViewHolder, position: Int) {
+            holder.bind(getItem(position))
         }
-        info.addView(cardTitle(task.title))
-        info.addView(cardMeta("\u9636\u6bb5\uff1a${task.stage}\uff5c\u603b\u8fdb\u5ea6\uff1a${task.progress.coerceIn(0, 100)}%"))
-        if (task.totalBytes > 0L) {
-            val uploadPercent = (task.uploadedBytes.coerceIn(0L, task.totalBytes) * 100 / task.totalBytes).toInt()
-            info.addView(cardMeta("音频上传：$uploadPercent%（${formatBytes(task.uploadedBytes)} / ${formatBytes(task.totalBytes)}）"))
-        }
-        if (task.remoteJobId.isNotBlank()) {
-            val syncedAt = if (task.remoteUpdatedAt > 0L) {
-                SimpleDateFormat("HH:mm:ss", Locale.CHINA).format(Date(task.remoteUpdatedAt))
-            } else "等待首次同步"
-            info.addView(cardMeta("电脑任务：${task.remoteJobId.take(8)}…｜最后同步：$syncedAt"))
-        }
-        info.addView(cardMeta(task.message.ifBlank { task.status.id }))
-        top.addView(info, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        if (task.connectionLabel.isNotBlank()) top.addView(badge(task.connectionLabel))
-        card.addView(top)
-        card.addView(ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
-            max = 100
-            progress = task.progress.coerceIn(0, 100)
-        }, LinearLayout.LayoutParams.MATCH_PARENT, dp(12))
-        val actions = LinearLayout(this).apply {
+    }
+
+    private inner class ProcessingTaskViewHolder : RecyclerView.ViewHolder(taskCard()) {
+        private val card = itemView as LinearLayout
+        private val thumbnailSlot = FrameLayout(this@LearningActivity)
+        private val title = cardTitle("")
+        private val stage = cardMeta("")
+        private val upload = cardMeta("")
+        private val remote = cardMeta("")
+        private val message = cardMeta("")
+        private val connection = badge("")
+        private val progress = ProgressBar(this@LearningActivity, null, android.R.attr.progressBarStyleHorizontal).apply { max = 100 }
+        private val actions = LinearLayout(this@LearningActivity).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.END
         }
-        when (task.status) {
-            CaptionTaskStatus.RUNNING, CaptionTaskStatus.QUEUED -> actions.addView(smallButton("暂停") { pauseTask(task) })
-            CaptionTaskStatus.PAUSED -> actions.addView(smallButton("继续") { resumeTask(task) })
-            CaptionTaskStatus.FAILED -> {
-                actions.addView(smallButton("继续") { resumeTask(task) })
-                actions.addView(smallButton("重试") { retryTask(task) })
+        private var boundUri = ""
+        private var boundStatus: CaptionTaskStatus? = null
+        private var boundTask: CaptionTask? = null
+
+        init {
+            card.layoutParams = RecyclerView.LayoutParams(RecyclerView.LayoutParams.MATCH_PARENT, RecyclerView.LayoutParams.WRAP_CONTENT).apply {
+                setMargins(0, 10, 0, 4)
             }
-            else -> Unit
+            val top = LinearLayout(this@LearningActivity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            top.addView(thumbnailSlot, LinearLayout.LayoutParams(dp(92), dp(70)))
+            val info = LinearLayout(this@LearningActivity).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(12, 0, 0, 0)
+                addView(title)
+                addView(stage)
+                addView(upload)
+                addView(remote)
+                addView(message)
+            }
+            top.addView(info, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            top.addView(connection)
+            card.addView(top)
+            card.addView(progress, LinearLayout.LayoutParams.MATCH_PARENT, dp(12))
+            card.addView(actions)
         }
-        actions.addView(smallButton("取消") { cancelTask(task) })
-        card.addView(actions)
-        return card
+
+        fun bind(task: CaptionTask) {
+            boundTask = task
+            if (boundUri != task.uri) {
+                boundUri = task.uri
+                thumbnailSlot.removeAllViews()
+                thumbnailSlot.addView(
+                    videoThumbnail(task.uri),
+                    FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
+                )
+            }
+            title.text = task.title
+            stage.text = "阶段：${task.stage}｜总进度：${task.progress.coerceIn(0, 100)}%"
+            if (task.totalBytes > 0L) {
+                val uploadPercent = (task.uploadedBytes.coerceIn(0L, task.totalBytes) * 100 / task.totalBytes).toInt()
+                upload.text = "音频上传：$uploadPercent%（${formatBytes(task.uploadedBytes)} / ${formatBytes(task.totalBytes)}）"
+                upload.visibility = View.VISIBLE
+            } else {
+                upload.visibility = View.GONE
+            }
+            if (task.remoteJobId.isNotBlank()) {
+                val syncedAt = if (task.remoteUpdatedAt > 0L) {
+                    SimpleDateFormat("HH:mm:ss", Locale.CHINA).format(Date(task.remoteUpdatedAt))
+                } else "等待首次同步"
+                remote.text = "电脑任务：${task.remoteJobId.take(8)}…｜最后同步：$syncedAt"
+                remote.visibility = View.VISIBLE
+            } else {
+                remote.visibility = View.GONE
+            }
+            message.text = task.message.ifBlank { task.status.id }
+            connection.text = task.connectionLabel
+            connection.visibility = if (task.connectionLabel.isBlank()) View.GONE else View.VISIBLE
+            progress.progress = task.progress.coerceIn(0, 100)
+            if (boundStatus != task.status) {
+                boundStatus = task.status
+                rebuildActions(task.status)
+            }
+        }
+
+        private fun rebuildActions(status: CaptionTaskStatus) {
+            actions.removeAllViews()
+            when (status) {
+                CaptionTaskStatus.RUNNING, CaptionTaskStatus.QUEUED -> actions.addView(smallButton("暂停") { boundTask?.let(::pauseTask) })
+                CaptionTaskStatus.PAUSED -> actions.addView(smallButton("继续") { boundTask?.let(::resumeTask) })
+                CaptionTaskStatus.FAILED -> {
+                    actions.addView(smallButton("继续") { boundTask?.let(::resumeTask) })
+                    actions.addView(smallButton("重试") { boundTask?.let(::retryTask) })
+                }
+                else -> Unit
+            }
+            actions.addView(smallButton("取消") { boundTask?.let(::cancelTask) })
+        }
     }
 
     private fun completedTaskCard(task: CaptionTask): View {
@@ -1205,7 +1279,7 @@ class LearningActivity : Activity() {
     private fun renderCurrentTaskTab() {
         val content = tabContent ?: return
         when (currentTab) {
-            MainTab.PROCESSING -> renderProcessingPage(content, preserveScrollPosition = true)
+            MainTab.PROCESSING -> refreshProcessingTasks()
             MainTab.COMPLETED -> renderCompletedPage(content)
             MainTab.MINE -> renderMinePage(content)
             MainTab.LEARNING -> Unit
@@ -4173,6 +4247,13 @@ class LearningActivity : Activity() {
 
         val safeVideoEndMs: Int
             get() = ((videoDurationMs ?: 0) - 500).coerceAtLeast(0)
+    }
+
+    companion object {
+        private val PROCESSING_TASK_DIFF = object : DiffUtil.ItemCallback<CaptionTask>() {
+            override fun areItemsTheSame(oldItem: CaptionTask, newItem: CaptionTask): Boolean = oldItem.id == newItem.id
+            override fun areContentsTheSame(oldItem: CaptionTask, newItem: CaptionTask): Boolean = oldItem == newItem
+        }
     }
 
     private enum class MainTab(val label: String, val iconRes: Int) {
