@@ -1502,7 +1502,15 @@ class LearningActivity : Activity() {
 
     private fun moveSelection(delta: Int) {
         if (subtitles.isEmpty()) return
-        val next = if (selectedIndex < 0) 0 else (selectedIndex + delta).coerceIn(0, subtitles.lastIndex)
+        val currentMs = runCatching { mediaPlayer?.currentPosition }.getOrNull() ?: pendingResumePositionMs
+        val intervals = subtitles.map { line ->
+            SubtitleNavigationInterval(
+                startMs = startMs(line),
+                endMs = endMs(line)
+            )
+        }
+        val next = subtitleNavigationTarget(intervals, currentMs, delta)
+        if (next < 0) return
         playLine(next)
     }
 
