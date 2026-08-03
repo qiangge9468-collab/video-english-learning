@@ -348,6 +348,28 @@ class CaptionGenerationService : Service() {
                 errors += "${serviceLabel(url)}: ${error.message}"
             }
         }
+        val discoveredUrl = runCatching { githubDiscoveredServiceUrl(expanded) }.getOrNull()
+        if (discoveredUrl != null && discoveredUrl !in expanded) {
+            runCatching {
+                requestProbeJson(URL(pingUrl(discoveredUrl)))
+            }.onSuccess {
+                val discovered = runCatching { configuredServiceUrls(discoveredUrl) }.getOrDefault(emptyList())
+                val remembered = linkedSetOf<String>().apply {
+                    addAll(expanded)
+                    add(discoveredUrl)
+                    addAll(discovered)
+                }.sortedWith(compareBy { serviceUrlPriority(it) })
+                saveServiceUrlCandidates(remembered)
+                getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+                    .edit()
+                    .putString(SERVICE_URL_KEY, discoveredUrl)
+                    .apply()
+                progress("已通过 GitHub 发现最新公网 Whisper 服务")
+                return discoveredUrl
+            }.onFailure { error ->
+                errors += "GitHub 自动发现公网: ${error.message}"
+            }
+        }
         error("所有 Whisper 地址都连接失败。${errors.takeLast(3).joinToString("；")}")
     }
 
@@ -401,6 +423,19 @@ class CaptionGenerationService : Service() {
             model.contains("sdk") ||
             model.contains("emulator") ||
             product.contains("sdk")
+    }
+
+    private fun githubDiscoveredServiceUrl(knownUrls: Collection<String>): String? {
+        val discoveryUrl = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+            .getString(SERVICE_CONFIG_GITHUB_URL_KEY, null).orEmpty().trim()
+        if (!ServicePairingConfig.isAllowedDiscoveryUrl(discoveryUrl)) return null
+        val separator = if (discoveryUrl.contains('?')) '&' else '?'
+        val fetchUrl = "$discoveryUrl${separator}t=${System.currentTimeMillis()}"
+        val item = JSONObject(requestProbeJson(URL(fetchUrl)))
+        if (item.optInt("schema_version") != ServicePairingConfig.SCHEMA_VERSION) return null
+        return ServicePairingConfig.buildDiscoveredPublicUrl(
+            item.optString("public_base_url"), knownUrls
+        )
     }
 
     private fun configuredServiceUrls(seedUrl: String): List<String> {
@@ -1483,6 +1518,7 @@ class CaptionGenerationService : Service() {
         private const val PREFS_NAME = "video_english_learning"
         private const val SERVICE_URL_KEY = "whisper_service_url"
         private const val SERVICE_URL_CANDIDATES_KEY = "whisper_service_url_candidates"
+        private const val SERVICE_CONFIG_GITHUB_URL_KEY = "service_config_github_url"
         private const val PHONE_USB_SERVICE_URL = "http://127.0.0.1:8766/transcribe"
         private const val EMULATOR_SERVICE_URL = "http://10.0.2.2:8766/transcribe"
     }

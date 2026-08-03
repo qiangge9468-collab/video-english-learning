@@ -25,4 +25,14 @@ class ServicePairingConfigTest {
         assertFalse(ServicePairingConfig.isTailscaleUrl("https://example.com/transcribe"))
         assertTrue(ServicePairingConfig.isTailscaleUrl("https://pc.example.ts.net/transcribe"))
     }
+    @Test fun buildsTokenProtectedPublicUrlFromGitHubDiscovery() {
+        val known = listOf("http://127.0.0.1:8766/transcribe?token=abcdefghijklmnopqrstuvwxyz123456")
+        assertEquals(
+            "https://fresh.trycloudflare.com/transcribe?token=abcdefghijklmnopqrstuvwxyz123456",
+            ServicePairingConfig.buildDiscoveredPublicUrl("https://fresh.trycloudflare.com", known)
+        )
+        assertTrue(ServicePairingConfig.isAllowedDiscoveryUrl("https://gist.githubusercontent.com/user/id/raw/service-config.json"))
+        assertFalse(ServicePairingConfig.isAllowedDiscoveryUrl("https://example.com/config.json"))
+        assertEquals(null, ServicePairingConfig.buildDiscoveredPublicUrl("https://evil.example.com", known))
+    }
 }

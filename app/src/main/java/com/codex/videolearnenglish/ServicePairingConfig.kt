@@ -17,6 +17,36 @@ object ServicePairingConfig {
         URI(url).host.orEmpty().lowercase().endsWith(".ts.net")
     }.getOrDefault(false)
 
+    fun isAllowedDiscoveryUrl(url: String): Boolean = runCatching {
+        val uri = URI(url)
+        uri.scheme.equals("https", ignoreCase = true) &&
+            uri.rawUserInfo == null &&
+            uri.host.orEmpty().lowercase() in setOf("gist.githubusercontent.com", "raw.githubusercontent.com")
+    }.getOrDefault(false)
+
+    fun buildDiscoveredPublicUrl(publicBase: String, knownUrls: Iterable<String>): String? {
+        val token = knownUrls.asSequence().mapNotNull(::tokenFromUrl).firstOrNull() ?: return null
+        return runCatching {
+            val uri = URI(publicBase.trim())
+            val host = uri.host.orEmpty().lowercase()
+            if (!uri.scheme.equals("https", ignoreCase = true) || !host.endsWith(".trycloudflare.com")) return null
+            if (uri.rawUserInfo != null || uri.rawQuery != null || uri.rawFragment != null) return null
+            if (uri.path.orEmpty().trim('/').isNotEmpty()) return null
+            "https://$host/transcribe?token=$token"
+        }.getOrNull()
+    }
+
+    private fun tokenFromUrl(url: String): String? = runCatching {
+        URI(url).rawQuery.orEmpty().split('&').firstNotNullOfOrNull { part ->
+            val pieces = part.split('=', limit = 2)
+            if (pieces.size == 2 && pieces[0] == "token" && pieces[1].matches(Regex("[A-Za-z0-9._~-]{16,128}"))) {
+                pieces[1]
+            } else {
+                null
+            }
+        }
+    }.getOrNull()
+
     private fun isAllowedTranscribeUrl(url: String): Boolean = runCatching {
         val uri = URI(url)
         val scheme = uri.scheme.orEmpty().lowercase()

@@ -9,7 +9,7 @@
 从 v2.0.2 开始，手机只负责可断点续传的音频上传和进度查询；电脑接收完整音频后会独立跑完识别与翻译。即使手机锁屏、App 被系统重建或网络暂时断开，电脑任务也不会中止，手机恢复连接后会继续显示同一个任务的进度并取回结果。
 v2.0.4 进一步解决运行中新增视频的调度问题：即使手机正在查询一个长视频的电脑处理进度，新加入的视频也会立即优先提取并上传音频、提交到电脑 FIFO 队列，然后手机再恢复原任务查询。电脑收到完整音频和任务 ID 后，即使手机锁屏、切换应用或断开连接，也会独立继续识别和翻译。
 v2.0.5 新增随电脑服务自动打开的本地网页仪表盘，可以直接看到当前处理的视频、阶段与总进度、预计剩余时间、FIFO 队列、最近任务、模型、GPU 和 USB/局域网/公网连接地址。
-v2.1.0 在保留 v2.0.6 WhisperX CUDA 字幕流水线和旧 APK 的基础上，新增主动回忆复习、USB 首次自动配对、持久 token 与 Tailscale Serve 私有固定地址；公网隧道改为明确选择后才开启。
+v2.1.0 在保留 v2.0.6 WhisperX CUDA 字幕流水线和旧 APK 的基础上，新增主动回忆复习、USB 首次自动配对、持久 token、Tailscale Serve 私有固定地址，以及通过个人 GitHub Gist 自动发现每次启动生成的最新公网地址。
 
 
 ## 适合谁使用
@@ -57,10 +57,10 @@ v2.1.0 在保留 v2.0.6 WhisperX CUDA 字幕流水线和旧 APK 的基础上，�
 v2.1.0 是面向愿意从 GitHub 获取项目、并希望长期安全使用电脑服务的推荐版本。它完整保留 v2.0.6 的 WhisperX 3.8.6 CUDA 对齐、识别质量门控、SaT 断句、词典和视频位置恢复能力，同时加入以下功能：
 
 - “我的”页面在“单词本”下方新增“今日复习”，提供释义回忆、原句填空、中译英和听音拼写，以及忘记/困难/记住/简单四档间隔复习。
-- 首次使用时，安装 v2.1.0 APK，把手机通过 USB 连接电脑并允许 USB 调试，然后启动电脑服务；脚本会建立 `adb reverse`，并把带 token 的 USB、局域网、Tailscale 私网以及显式启用的公网候选地址直接写入手机。
+- 首次使用时，安装 v2.1.0 APK，把手机通过 USB 连接电脑并允许 USB 调试，然后启动电脑服务；脚本会建立 `adb reverse`，并把带 token 的 USB、局域网、Tailscale 私网、公网候选地址及个人 GitHub 配置地址直接写入手机。
 - token 保存于未纳入 Git 的 `service_data_v2.1.0/service_auth_token.txt`，重启电脑服务后不再变化，因此已经配对的地址可继续使用。
-- 地址优先级为 `USB/模拟器 -> 局域网 -> Tailscale 私网 -> 手动或显式启用的公网 HTTPS`。手机端仍保留服务地址输入框，可以手动填写、测试和保存公网地址。
-- 默认不再启动 Cloudflare 临时公网隧道，也不会启用 Tailscale Funnel。Tailscale Serve 只对同一 tailnet 内、且被访问控制策略允许的设备开放，避免其他开源项目用户访问或上传文件到你的电脑。
+- 地址优先级为 `USB/模拟器 -> 局域网 -> Tailscale 私网 -> 手动公网 HTTPS -> GitHub 自动发现的公网 HTTPS`。手机端仍保留服务地址输入框，可以手动填写、测试和保存公网地址。
+- 默认启动 Cloudflare 临时公网隧道，并把不含 token 的基础地址发布到当前 GitHub 用户自己的 secret（不公开列出）Gist。token 只保存在电脑和已配对手机中，不会上传 GitHub；Tailscale Funnel 仍不会启用。
 - v2.0.6 APK、电脑端脚本和数据目录完整保留，不会被 v2.1.0 覆盖。
 
 安装包位置：`release/app-v2.1.0.apk`
@@ -79,17 +79,32 @@ powershell -ExecutionPolicy Bypass -File tools/versions/v2.1.0/start_service.ps1
 
 PowerShell 出现 `Phone service addresses updated` 后，手机已收到地址，无需复制 token。以后服务会继续监测 USB 设备；重新插入手机时会自动恢复端口映射并刷新地址。Android 接收器要求系统级 `android.permission.DUMP`，因此只有 ADB shell/系统能够写入，普通第三方 App 无法伪造配对广播。
 
-#### Tailscale 私有固定地址
+#### GitHub 无 USB 自动发现公网地址
 
-电脑和手机安装 Tailscale、登录同一个 tailnet 后，启动脚本会尝试执行 `tailscale serve --bg 8766`，读取这台电脑稳定的 `*.ts.net` 名称并自动写入手机。Tailscale 未安装或未登录时，USB 和局域网仍正常使用。官方说明：[Tailscale Serve](https://tailscale.com/kb/1242/tailscale-serve) 仅在 tailnet 内提供服务；[Tailscale Funnel](https://tailscale.com/kb/1223/funnel) 才是公网入口，本项目不会自动启用 Funnel。
+v2.1.0 的目标是：电脑每次启动服务后，即使手机没有通过 USB 连接，也能自动取得本次新生成的 Cloudflare 公网地址。
 
-如果确实需要临时公共地址，可显式运行：
+1. 电脑安装 [GitHub CLI](https://cli.github.com/) 并执行一次 `gh auth login`。启动脚本使用当前登录账号创建一个个人 secret Gist。
+2. 手机仍需完成一次上面的 USB 配对，以安全取得持久 token 和这个 Gist 的固定 raw 地址。
+3. 以后每次启动 v2.1.0 服务，脚本默认启动 Cloudflare Tunnel，并更新同一个 Gist 中的 `public_base_url`。
+4. 手机无法连接 USB、局域网、Tailscale 或已保存公网地址时，会读取 Gist、拼接手机本地保存的 token，再测试最新公网地址。请求附带时间参数，避免 GitHub raw 缓存返回旧内容。
+
+Gist 只保存类似 `https://xxxx.trycloudflare.com` 的基础地址和更新时间，不保存 `/transcribe?token=...`，因此其他人即使知道配置地址，也不能通过它取得上传权限。secret Gist 是“不公开列出”而非端到端加密；真正控制访问的是随机持久 token。不要在截图、Issue 或日志中公开完整带 token 的服务 URL。
+
+每个开源项目用户都使用自己 `gh auth login` 的 GitHub 账号和自己的 Gist，不会读取作者账号的配置，也不会把文件上传到作者电脑。没有 GitHub 账号的用户建议继续使用完整保留的 v2.0.6。
+
+如果不想启动公网隧道，可运行：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File tools/versions/v2.1.0/start_service.ps1 -EnablePublicTunnel
+powershell -ExecutionPolicy Bypass -File tools/versions/v2.1.0/start_service.ps1 -NoPublicTunnel
 ```
 
-也可以在手机“我的 -> 电脑端服务”里手动填写自己的公网 HTTPS `/transcribe?token=...` 地址并测试。公共地址意味着暴露面扩大，必须保留高强度 token，且不要在截图、Issue 或日志中公开完整 URL。
+旧的 `-EnablePublicTunnel` 参数仍兼容，但 v2.1.0 现在默认已经启用，无需再写。
+
+#### Tailscale 私有固定地址
+
+电脑和手机安装 Tailscale、登录同一个 tailnet 后，启动脚本会尝试执行 `tailscale serve --bg 8766`，读取这台电脑稳定的 `*.ts.net` 名称并自动写入手机。Tailscale 未安装或未登录时，USB、局域网和 GitHub 公网自动发现仍正常使用。官方说明：[Tailscale Serve](https://tailscale.com/kb/1242/tailscale-serve) 仅在 tailnet 内提供服务；[Tailscale Funnel](https://tailscale.com/kb/1223/funnel) 才是公网入口，本项目不会自动启用 Funnel。
+
+手机“我的 -> 电脑端服务”仍保留手动输入框，可以填写自己的公网 HTTPS `/transcribe?token=...` 地址并测试。
 
 ### v2.0.6
 
@@ -245,7 +260,7 @@ v1.0.0 是早期版本，功能集中在单个学习页面里。
 | `release/app-v2.0.4.apk` | `tools/versions/v2.0.4/start_service.ps1` | `tools/versions/v2.0.4/service.py` | 增加运行中新增视频优先上传、连续后台锁、0.05 秒时间微调，以及服务重启后的地址/token 自动刷新 |
 | `release/app-v2.0.5.apk` | `tools/versions/v2.0.5/start_service.ps1` | `tools/versions/v2.0.5/service.py` | 保留版本；完整保留 v2.0.4 能力，并新增自动打开的本地网页仪表盘 |
 | `release/app-v2.0.6.apk` | `tools/versions/v2.0.6/start_service.ps1` | `tools/versions/v2.0.6/service.py` | 完整保留；没有 GitHub 账号时建议使用此组合 |
-| `release/app-v2.1.0.apk` | `tools/versions/v2.1.0/start_service.ps1` | `tools/versions/v2.1.0/service.py` | 当前推荐；增加今日复习、USB 自动配对、持久 token、Tailscale 私网固定地址，公网默认关闭 |
+| `release/app-v2.1.0.apk` | `tools/versions/v2.1.0/start_service.ps1` | `tools/versions/v2.1.0/service.py` | 当前推荐；增加今日复习、USB 自动配对、持久 token、Tailscale 私网，以及 GitHub 无 USB 自动发现最新公网地址 |
 
 升级电脑端版本时，请先等待旧电脑端队列结束并按 `Ctrl + C` 关闭旧服务，再安装对应 APK，最后运行同版本启动脚本。旧 APK、启动脚本和服务源码都可以继续保留，但两个服务不能同时占用默认的 8766 端口。
 
@@ -259,7 +274,7 @@ v1.0.0 是早期版本，功能集中在单个学习页面里。
 
 ```powershell
 cd C:\tmp\video-english-learning-remote
-powershell -ExecutionPolicy Bypass -File tools/versions/v2.0.6/start_service.ps1
+powershell -ExecutionPolicy Bypass -File tools/versions/v2.1.0/start_service.ps1
 ```
 
 这个脚本会同时启动字幕识别、中文翻译和连接服务。服务就绪后会自动打开 `http://127.0.0.1:8766/dashboard?token=...` 本地仪表盘；PowerShell 窗口仍负责保持服务运行并输出精简状态。正常启动后可以看到三类地址：
@@ -271,7 +286,7 @@ powershell -ExecutionPolicy Bypass -File tools/versions/v2.0.6/start_service.ps1
 这些地址也会保存到：
 
 ```text
-tools/runtime/v2.0.6/latest_service_urls.txt
+tools/runtime/v2.1.0/latest_service_urls.txt
 ```
 
 如果手机端不知道该填哪个地址，优先看这个文件。
@@ -299,7 +314,7 @@ tools/runtime/v2.0.6/latest_service_urls.txt
 连接方式会自动优先选择：
 
 ```text
-USB/模拟器 -> 局域网 -> 公网 Cloudflare Tunnel
+USB/模拟器 -> 局域网 -> Tailscale 私网 -> 手动公网 -> GitHub 自动发现的 Cloudflare 公网
 ```
 
 每次连接都会先做短超时探测：手机连着 USB 时优先走 USB；拔掉 USB 后自动尝试局域网；局域网不可达时再尝试公网地址。某条线路中断只影响手机本次上传或进度同步，不会终止电脑端已提交的任务。
@@ -450,19 +465,19 @@ http://192.168.0.126:8766/transcribe?token=你的token
 
 ### 手机流量或异地连接
 
-如果手机使用流量，或者手机和电脑不在同一个局域网，就必须使用公网备用地址。脚本会通过 Cloudflare Tunnel 生成一个临时 HTTPS 地址，例如：
+如果手机使用流量，或者手机和电脑不在同一个局域网，v2.1.0 启动脚本会默认通过 Cloudflare Tunnel 生成临时 HTTPS 基础地址，例如：
 
 ```text
-https://xxxx.trycloudflare.com/transcribe?token=你的token
+https://xxxx.trycloudflare.com
 ```
 
-公网地址生成后会显示在 PowerShell 窗口，也会写入：
+脚本把这个不含 token 的基础地址写入当前 GitHub 用户自己的 secret Gist；完整带 token 的地址仍只显示在本机并写入：
 
 ```text
-tools/runtime/v2.0.6/latest_service_urls.txt
+tools/runtime/v2.1.0/latest_service_urls.txt
 ```
 
-注意：Cloudflare 免费临时隧道不是永久地址。每次重新启动服务后，公网地址可能会变化，需要在手机端重新填写或等待 App 自动更新。
+Cloudflare 免费临时地址每次启动可能变化，但已完成一次 USB 配对的 v2.1.0 App 会从固定 Gist 地址自动读取最新基础地址，并和手机本地 token 组合，无需再次插 USB 或手动填写。如果 GitHub CLI 未登录，脚本会明确提示，此时仍可在手机“我的 -> 电脑端服务”中手动保存完整公网地址。
 
 如果电脑没有安装 `cloudflared`，可以安装：
 

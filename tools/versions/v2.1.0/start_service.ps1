@@ -1,6 +1,7 @@
 ﻿param(
     [int]$Port = 8766,
     [switch]$EnablePublicTunnel,
+    [switch]$NoPublicTunnel,
     [switch]$NoAuth,
     [switch]$NoDashboard,
     [switch]$NoTailscale
@@ -158,6 +159,8 @@ $env:WHISPER_PORT = "$Port"
 $runtimeConfig = Join-Path $projectRoot "tools\runtime\v2.1.0\config.json"
 $runtimeStatus = Join-Path $projectRoot "tools\runtime\v2.1.0\status.json"
 $latestUrlsFile = Join-Path $projectRoot "tools\runtime\v2.1.0\latest_service_urls.txt"
+$githubConfigStateFile = Join-Path $dataDir "github_service_config_state.json"
+$githubConfigPayloadFile = Join-Path $dataDir "service-config.json"
 $runtimeDir = Split-Path -Parent $runtimeConfig
 if (-not (Test-Path -LiteralPath $runtimeDir)) { New-Item -ItemType Directory -Path $runtimeDir -Force | Out-Null }
 $env:WHISPER_RUNTIME_CONFIG = $runtimeConfig
@@ -190,6 +193,68 @@ function Get-AdbPath {
         }
     }
     return $null
+}
+
+function Get-GhPath {
+    $cmd = Get-Command gh -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
+    return $null
+}
+
+function Read-GitHubConfigState {
+    if (-not (Test-Path -LiteralPath $githubConfigStateFile)) { return $null }
+    try { return Get-Content -LiteralPath $githubConfigStateFile -Raw -Encoding utf8 | ConvertFrom-Json } catch { return $null }
+}
+
+function Get-GitHubConfigUrl {
+    $state = Read-GitHubConfigState
+    if ($state -and $state.discovery_url) { return [string]$state.discovery_url }
+    return ""
+}
+
+function Publish-GitHubServiceConfig {
+    param([string]$PublicBase)
+    if (-not $PublicBase) { return Get-GitHubConfigUrl }
+    $gh = Get-GhPath
+    if (-not $gh) {
+        Write-Host "GitHub CLI was not found; public URL cannot be auto-published. Install gh or enter the URL manually." -ForegroundColor Yellow
+        return Get-GitHubConfigUrl
+    }
+    & $gh auth status --hostname github.com 1>$null 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "GitHub CLI is not signed in; run gh auth login once to enable no-USB address discovery." -ForegroundColor Yellow
+        return Get-GitHubConfigUrl
+    }
+    $payload = [ordered]@{
+        schema_version = 1
+        service_version = "2.1.0"
+        updated_at = (Get-Date).ToUniversalTime().ToString("o")
+        expires_at = (Get-Date).ToUniversalTime().AddHours(24).ToString("o")
+        public_base_url = $PublicBase.TrimEnd([char]47)
+    }
+    Write-TextFileAtomic -Path $githubConfigPayloadFile -Lines @($payload | ConvertTo-Json -Depth 4)
+    try {
+        $state = Read-GitHubConfigState
+        $gistId = if ($state) { [string]$state.gist_id } else { "" }
+        if ($gistId) {
+            & $gh gist edit $gistId --filename service-config.json $githubConfigPayloadFile 1>$null 2>$null
+            if ($LASTEXITCODE -ne 0) { throw "gh gist edit failed" }
+        } else {
+            $gistUrl = (& $gh gist create $githubConfigPayloadFile --desc "Video English Learning private service discovery (URL only, no token)" 2>$null | Select-Object -Last 1).Trim()
+            if ($LASTEXITCODE -ne 0 -or -not $gistUrl) { throw "gh gist create failed" }
+            $gistId = ($gistUrl.TrimEnd([char]47) -split "/")[-1]
+        }
+        $login = (& $gh api user --jq .login 2>$null | Select-Object -First 1).Trim()
+        if (-not $login -or -not $gistId) { throw "could not resolve GitHub user or gist id" }
+        $discoveryUrl = "https://gist.githubusercontent.com/$login/$gistId/raw/service-config.json"
+        $newState = [ordered]@{ gist_id = $gistId; discovery_url = $discoveryUrl; updated_at = (Get-Date).ToString("s") }
+        Write-TextFileAtomic -Path $githubConfigStateFile -Lines @($newState | ConvertTo-Json -Depth 3)
+        Write-Host "GitHub no-USB discovery updated: $discoveryUrl" -ForegroundColor Green
+        return $discoveryUrl
+    } catch {
+        Write-Host "GitHub discovery update failed: $($_.Exception.Message). Public URL is still available for manual entry." -ForegroundColor Yellow
+        return Get-GitHubConfigUrl
+    }
 }
 
 function Get-TailscalePath {
@@ -267,7 +332,7 @@ function Write-TextFileAtomic {
     }
 }
 
-function Write-RuntimeConfig([string]$PublicBase = "", [string]$TailscaleBase = "") {
+function Write-RuntimeConfig([string]$PublicBase = "", [string]$TailscaleBase = "", [string]$GitHubConfigUrl = "") {
     $lanUrls = @()
     foreach ($ip in Get-LanIps) {
         $lanUrls += New-ServiceUrl "http://${ip}:$Port"
@@ -288,12 +353,13 @@ function Write-RuntimeConfig([string]$PublicBase = "", [string]$TailscaleBase = 
         updated_at = (Get-Date).ToString("s")
         port = $Port
         token_required = [bool]$token
-        privacy_mode = $(if ($PublicBase) { "public_opt_in" } else { "private" })
+        privacy_mode = $(if ($PublicBase) { "public_auto_token_protected" } else { "private" })
         dashboard_url = New-DashboardUrl
         transcribe_urls = @($urls | Where-Object { $_ } | Select-Object -Unique)
         lan_urls = @($lanUrls | Select-Object -Unique)
         tailscale_url = $(if ($TailscaleBase) { New-ServiceUrl ($TailscaleBase.TrimEnd([char]47)) } else { "" })
         public_url = $(if ($PublicBase) { New-ServiceUrl ($PublicBase.TrimEnd([char]47)) } else { "" })
+        github_config_url = $GitHubConfigUrl
     }
     Write-TextFileAtomic -Path $runtimeConfig -Lines @($config | ConvertTo-Json -Depth 5)
 }
@@ -303,7 +369,7 @@ function Get-ServiceUrlSummary {
     $lanUrls = @(Get-LanIps | ForEach-Object { New-ServiceUrl "http://${_}:$Port" })
     $usbUrl = New-ServiceUrl "http://127.0.0.1:8766"
     $tailscaleUrl = if ($TailscaleBase) { New-ServiceUrl ($TailscaleBase.TrimEnd([char]47)) } else { "未启用（USB/局域网仍可用）" }
-    $publicUrl = if ($PublicBase) { New-ServiceUrl ($PublicBase.TrimEnd([char]47)) } else { "默认关闭（隐私保护）" }
+    $publicUrl = if ($PublicBase) { New-ServiceUrl ($PublicBase.TrimEnd([char]47)) } else { "等待 Cloudflare 临时地址" }
     return [ordered]@{
         usb = $usbUrl
         lan = $lanUrls
@@ -313,7 +379,7 @@ function Get-ServiceUrlSummary {
 }
 
 function Write-LatestServiceUrls {
-    param([string]$PublicBase = "", [string]$TailscaleBase = "")
+    param([string]$PublicBase = "", [string]$TailscaleBase = "", [string]$GitHubConfigUrl = "")
     $summary = Get-ServiceUrlSummary $PublicBase $TailscaleBase
     $lines = New-Object System.Collections.Generic.List[string]
     $lines.Add("看视频学英语 - 最新电脑端服务地址")
@@ -335,7 +401,10 @@ function Write-LatestServiceUrls {
     $lines.Add("公网/手机流量:")
     $lines.Add("  $($summary.public)")
     $lines.Add("")
-    $lines.Add("推荐手机和电脑加入同一 Tailscale 网络；公网隧道仅在显式使用 -EnablePublicTunnel 时开启。")
+    $lines.Add("GitHub 无 USB 地址发现:")
+    $lines.Add("  $(if ($GitHubConfigUrl) { $GitHubConfigUrl } else { '等待公网地址或 GitHub 登录' })")
+    $lines.Add("")
+    $lines.Add("公网地址默认生成并发布到个人 secret Gist；配置只含基础地址，不含 token。使用 -NoPublicTunnel 可关闭。")
     Write-TextFileAtomic -Path $latestUrlsFile -Lines $lines
 }
 
@@ -345,7 +414,7 @@ function Write-PublicUrlReady {
     $publicUrl = New-ServiceUrl ($PublicBase.TrimEnd([char]47))
     Write-Host ""
     Write-Host "============================================================" -ForegroundColor Green
-    Write-Host "公网地址已就绪，手机用流量时复制这一行：" -ForegroundColor Green
+    Write-Host "公网地址已就绪；GitHub 登录可让已配对手机在无 USB 时自动发现：" -ForegroundColor Green
     Write-Host "  $publicUrl" -ForegroundColor Green
     Write-Host "地址也已保存到：$latestUrlsFile" -ForegroundColor Green
     Write-Host "============================================================" -ForegroundColor Green
@@ -509,11 +578,12 @@ if (Test-PortBusy $Port) {
 
 $tailscale = if ($NoTailscale) { $null } else { Get-TailscalePath }
 $tailscaleBase = if ($tailscale) { Enable-TailscalePrivateServe $tailscale } else { "" }
+$githubConfigUrl = Get-GitHubConfigUrl
 if (-not $tailscaleBase -and -not $NoTailscale) {
     Write-Host "Tailscale private address unavailable; install/sign in to Tailscale for a stable remote address." -ForegroundColor Yellow
 }
-Write-RuntimeConfig "" $tailscaleBase
-Write-LatestServiceUrls "" $tailscaleBase
+Write-RuntimeConfig "" $tailscaleBase $githubConfigUrl
+Write-LatestServiceUrls "" $tailscaleBase $githubConfigUrl
 
 $adb = Get-AdbPath
 $adbJob = $null
@@ -539,7 +609,7 @@ if ($adb) {
                     if (Test-Path -LiteralPath $ConfigPath) {
                         $configJson = Get-Content -LiteralPath $ConfigPath -Raw -Encoding utf8
                         $configObject = $configJson | ConvertFrom-Json
-                        $fingerprintSource = (@($configObject.transcribe_urls) -join "|") + "|" + [string]$configObject.tailscale_url + "|" + [string]$configObject.public_url
+                        $fingerprintSource = (@($configObject.transcribe_urls) -join "|") + "|" + [string]$configObject.tailscale_url + "|" + [string]$configObject.public_url + "|" + [string]$configObject.github_config_url
                         $fingerprint = [Convert]::ToBase64String([Security.Cryptography.SHA256]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes($fingerprintSource)))
                         if ($sentConfig[$serial] -ne $fingerprint) {
                             $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($configJson))
@@ -549,7 +619,7 @@ if ($adb) {
                                 --es config_base64 $encoded 2>&1) -join "`n"
                             if ($LASTEXITCODE -eq 0 -and $broadcast -match "Broadcast completed") {
                                 $sentConfig[$serial] = $fingerprint
-                                Write-Output "Phone service addresses updated for ${serial} (USB/LAN/Tailscale)."
+                                Write-Output "Phone service addresses updated for ${serial} (USB/LAN/Tailscale/GitHub discovery)."
                             } else {
                                 Write-Output "Phone pairing pending for ${serial}; install/open v2.1.0 and keep USB debugging allowed."
                             }
@@ -607,7 +677,8 @@ $serviceJob = Start-Job -ArgumentList $projectRoot, $Port, $token, $runtimeConfi
     & $servicePythonExe tools\versions\v2.1.0\service.py
 }
 
-$cloudflared = if ($EnablePublicTunnel) { Get-CloudflaredPath } else { $null }
+$publicTunnelEnabled = -not $NoPublicTunnel
+$cloudflared = if ($publicTunnelEnabled) { Get-CloudflaredPath } else { $null }
 $cloudJob = $null
 $recentLogs = New-Object 'System.Collections.Generic.Queue[string]'
 $publicBase = ""
@@ -642,8 +713,8 @@ try {
             param($CloudflaredExe, $ListenPort)
             & $CloudflaredExe tunnel --protocol http2 --url "http://127.0.0.1:$ListenPort" 2>&1 | ForEach-Object { [string]$_ }
         }
-    } elseif ($EnablePublicTunnel) {
-        Add-RecentLog $recentLogs "Public tunnel was requested but cloudflared was not found. Install with: winget install --id Cloudflare.cloudflared"
+    } elseif ($publicTunnelEnabled) {
+        Add-RecentLog $recentLogs "Automatic public tunnel needs cloudflared. Install with: winget install --id Cloudflare.cloudflared"
     }
 
     while ($true) {
@@ -663,7 +734,9 @@ try {
                     $newPublicBase = $Matches[0]
                     if ($newPublicBase -ne $publicBase) {
                         $publicBase = $newPublicBase
-                        Write-LatestServiceUrls $publicBase
+                        $githubConfigUrl = Publish-GitHubServiceConfig $publicBase
+                        Write-RuntimeConfig $publicBase $tailscaleBase $githubConfigUrl
+                        Write-LatestServiceUrls $publicBase $tailscaleBase $githubConfigUrl
                         if ($publicBase -ne $printedPublicBase) {
                             Write-PublicUrlReady $publicBase
                             $printedPublicBase = $publicBase
@@ -676,8 +749,8 @@ try {
             }
         }
 
-        Write-RuntimeConfig $publicBase $tailscaleBase
-        Write-LatestServiceUrls $publicBase $tailscaleBase
+        Write-RuntimeConfig $publicBase $tailscaleBase $githubConfigUrl
+        Write-LatestServiceUrls $publicBase $tailscaleBase $githubConfigUrl
         $status = Read-RuntimeStatus
         Write-ServiceDashboard -Status $status -RecentLogs $recentLogs -PublicBase $publicBase -TailscaleBase $tailscaleBase
         Start-Sleep -Seconds 2

@@ -646,6 +646,8 @@ def service_config():
                 if isinstance(urls, list):
                     merged = config["transcribe_urls"] + [str(url).strip() for url in urls if str(url).strip()]
                     config["transcribe_urls"] = list(dict.fromkeys(merged))
+                if saved.get("github_config_url"):
+                    config["github_config_url"] = str(saved["github_config_url"])
                 if saved.get("tailscale_url"):
                     config["tailscale_url"] = str(saved["tailscale_url"])
                 if saved.get("public_url"):
