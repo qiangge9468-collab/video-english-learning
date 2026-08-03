@@ -22,6 +22,8 @@ import android.os.Build
 import android.os.Bundle
 import android.provider.OpenableColumns
 import android.speech.tts.TextToSpeech
+import android.text.Editable
+import android.text.TextWatcher
 import android.text.SpannableString
 import android.text.Spanned
 import android.text.method.LinkMovementMethod
@@ -111,6 +113,12 @@ class LearningActivity : Activity() {
     private var pendingWordbookExample: WordbookEntry? = null
     private var learningReturnSnapshot: LearningSnapshot? = null
     private var wordbookReturnDay: String? = null
+    private var returnToReviewAfterExample = false
+    private var reviewSessionEntries: List<WordbookEntry> = emptyList()
+    private var reviewSessionIndex = 0
+    private var reviewAnswerShown = false
+    private var reviewTypedAnswer = ""
+    private var reviewAnswerCorrect: Boolean? = null
     private var playingWordbookExample = false
     private var pendingPreparedMessage: String? = null
     private var pendingPrepareSeekMs: Int? = null
@@ -144,11 +152,17 @@ class LearningActivity : Activity() {
     private val videoStateSelectedIndexKey = "selected_index"
     private val videoStateNormalPlaybackKey = "normal_playback"
     private val videoStateSubtitleOffsetKey = "subtitle_offset_ms"
-    private val emulatorServiceUrl = "http://10.0.2.2:8765/transcribe"
-    private val phoneUsbServiceUrl = "http://127.0.0.1:8765/transcribe"
+    private val emulatorServiceUrl = "http://10.0.2.2:8766/transcribe"
+    private val phoneUsbServiceUrl = "http://127.0.0.1:8766/transcribe"
     private val legacyEmulatorServiceUrl = "http://10.0.2.2:8765/transcribe?video=backpacking"
     private val subtitleCacheDirName = "subtitles_cache"
     private val wordbookFileName = "wordbook_history.json"
+    private val reviewStateFileName = "wordbook_review_state.json"
+    private val reviewSessionLimit = 20
+    private val reviewStatsDayKey = "review_stats_day"
+    private val reviewStatsCompletedKey = "review_stats_completed"
+    private val reviewStatsAttemptsKey = "review_stats_attempts"
+    private val reviewStatsCorrectKey = "review_stats_correct"
     private val sentenceTailGraceMs = 160
     private val nextSentenceGuardMs = 60
     private val seekBarProgressMax = 1000
@@ -706,10 +720,23 @@ class LearningActivity : Activity() {
         parent.addView(pageTitle("我的"))
         val scroll = ScrollView(this)
         val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val dueCount = dueReviewCount()
+        val stats = readTodayReviewStats()
+        val reviewDescription = buildString {
+            append(if (dueCount > 0) "今天有 $dueCount 个单词或短语待复习" else "今天的复习已经完成")
+            if (stats.completed > 0) {
+                append(" · 已完成 ${stats.completed} 个")
+                stats.accuracyPercent?.let { append(" · 拼写正确率 $it%") }
+            }
+        }
         list.addView(authorCard())
         list.addView(menuCard("单词本", "快速打开查词记录，按日期复习字幕里的单词和短语") { showWordbook() })
+        list.addView(menuCard(
+            "今日复习",
+            reviewDescription
+        ) { showTodayReview() })
         list.addView(menuCard("使用说明", "进入详细说明页：学习、批量生成字幕、电脑端服务、导出字幕") { showUsagePage() })
-        list.addView(menuCard("电脑端服务", "运行 tools/versions/v2.0.5/start_service.ps1 后，App 会优先使用 USB / 局域网 / 公网") { showServiceUrlDialog() })
+        list.addView(menuCard("电脑端服务", "运行 tools/versions/v2.1.0/start_service.ps1 后，App 会优先使用 USB / 局域网 / Tailscale，也可手动填写公网地址") { showServiceUrlDialog() })
         list.addView(menuCard("下载最新版", "打开 GitHub 项目 release 文件夹，下载作者更新的最新 APK") {
             openGitHubProject()
         })
@@ -1236,8 +1263,9 @@ class LearningActivity : Activity() {
         list.addView(infoCard("学习页", "导入或从“已完成”打开视频后，可以播放、上一句、下一句、循环、复读、早/晚 0.05 秒、切换英文/中文/双语、查单词和导出字幕。"))
         list.addView(infoCard("生成字幕中", "点“添加视频”可以一次选择多个视频。App 会后台依次提取音频，上传到电脑端 Whisper，生成英文字幕后自动调用电脑端翻译成中文。任务失败会自动续跑数次，也可以手动暂停、继续或重试。"))
         list.addView(infoCard("已完成", "已生成字幕的视频会集中在这里。可以开始学习、导出字幕、重新电脑端翻译或删除记录。删除时可选择只删任务记录，或连本地字幕缓存一起删除。"))
-        list.addView(infoCard("电脑端服务", "在电脑 PowerShell 运行：\ncd C:\\tmp\\video-english-learning-remote\npowershell -ExecutionPolicy Bypass -File tools/versions/v2.0.5/start_service.ps1\n\n手机 USB 连接时优先走 USB；同一局域网走局域网；外网/流量可走 Cloudflare 公网兜底。PowerShell 窗口不要关闭。"))
+        list.addView(infoCard("电脑端服务", "在电脑 PowerShell 运行：\ncd C:\\tmp\\video-english-learning-remote\npowershell -ExecutionPolicy Bypass -File tools/versions/v2.1.0/start_service.ps1\n\n首次 USB 连接会自动写入 USB、局域网和 Tailscale 地址；也可手动填写公网地址。PowerShell 窗口不要关闭。"))
         list.addView(infoCard("单词本", "在学习页点当前句里的单词或短语会自动保存。可在“我的 > 单词本”按日期复习，并跳回原视频例句。"))
+        list.addView(infoCard("今日复习", "入口位于“我的 > 单词本”下面。题型会在释义回忆、原句填空、中译英和听音拼写之间轮换；输入题会自动检查答案。核对后选择忘记、困难、记住或简单，系统会安排下次复习并统计当天完成数和拼写正确率。可随时播放视频原句并返回当前卡片。"))
         list.addView(infoCard("下载最新版", "在 GitHub 的 release 文件夹下载最新 APK：\nhttps://github.com/qiangge9468-collab/video-english-learning/tree/main/release"))
         scroll.addView(list)
         content.addView(scroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
@@ -1257,11 +1285,14 @@ class LearningActivity : Activity() {
             4. 电脑端服务
             在电脑 PowerShell 运行：
             cd C:\tmp\video-english-learning-remote
-            powershell -ExecutionPolicy Bypass -File tools/versions/v2.0.5/start_service.ps1
-            手机 USB 连接时优先走 USB；同一局域网走局域网；外网/流量可走 Cloudflare 公网兜底。PowerShell 窗口不要关闭。
+            powershell -ExecutionPolicy Bypass -File tools/versions/v2.1.0/start_service.ps1
+            首次 USB 连接会自动写入 USB、局域网和 Tailscale 地址；也可手动填写公网地址。PowerShell 窗口不要关闭。
 
             5. 单词本
             在学习页点当前句里的单词或短语会自动保存。可在“我的 > 单词本”按日期复习，并跳回原视频例句。
+
+            6. 今日复习
+            入口位于“我的 > 单词本”下面。题型会在释义回忆、原句填空、中译英和听音拼写之间轮换；输入题会自动检查答案。核对后选择忘记、困难、记住或简单，系统会安排下次复习并统计当天完成数和拼写正确率。可随时播放视频原句并返回当前卡片。
         """.trimIndent()
         AlertDialog.Builder(this)
             .setTitle("使用说明")
@@ -1418,7 +1449,8 @@ class LearningActivity : Activity() {
         transientNavRow.removeAllViews()
         val hasLearningReturn = learningReturnSnapshot != null
         val hasWordbookReturn = wordbookReturnDay != null && learningReturnSnapshot != null
-        if (!hasLearningReturn && !hasWordbookReturn) {
+        val hasReviewReturn = returnToReviewAfterExample && learningReturnSnapshot != null
+        if (!hasLearningReturn && !hasWordbookReturn && !hasReviewReturn) {
             transientNavRow.visibility = View.GONE
             return
         }
@@ -1426,7 +1458,9 @@ class LearningActivity : Activity() {
         if (hasLearningReturn) {
             transientNavRow.addView(controlButton("回学习") { returnToLearningSnapshot() })
         }
-        if (hasWordbookReturn) {
+        if (hasReviewReturn) {
+            transientNavRow.addView(controlButton("回复习") { returnToReviewSession() })
+        } else if (hasWordbookReturn) {
             transientNavRow.addView(controlButton("回单词本") { returnToWordbook() })
         }
     }
@@ -1632,6 +1666,353 @@ class LearningActivity : Activity() {
             }
             file.writeText(next.toString(), Charsets.UTF_8)
         }
+    }
+
+    private fun dueReviewCount(nowMs: Long = System.currentTimeMillis()): Int {
+        val states = readReviewStates()
+        return reviewableWordbookEntries().count { entry ->
+            ReviewScheduler.isDue(states[reviewCardId(entry)], nowMs)
+        }
+    }
+
+    private fun reviewableWordbookEntries(): List<WordbookEntry> {
+        return readWordbookEntries().distinctBy { reviewCardId(it) }
+    }
+
+    private fun showTodayReview(resetSession: Boolean = true) {
+        showingWordbook = true
+        mediaPlayer?.pause()
+        updateButtons()
+        if (resetSession) {
+            val now = System.currentTimeMillis()
+            val states = readReviewStates()
+            reviewSessionEntries = reviewableWordbookEntries()
+                .filter { ReviewScheduler.isDue(states[reviewCardId(it)], now) }
+                .sortedBy { states[reviewCardId(it)]?.dueAtMs ?: it.time }
+                .take(reviewSessionLimit)
+            reviewSessionIndex = 0
+            reviewAnswerShown = false
+            reviewTypedAnswer = ""
+            reviewAnswerCorrect = null
+        }
+        renderTodayReview()
+    }
+
+    private fun renderTodayReview() {
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(0xFFF7F8F5.toInt())
+            setPadding(18, 72, 18, 18)
+        }
+        root.addView(wordbookHeader("今日复习", "我的") { returnFromTodayReview() })
+        addWordbookReturnControls(root)
+        val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val entry = reviewSessionEntries.getOrNull(reviewSessionIndex)
+        if (entry == null) {
+            val hasEntries = reviewableWordbookEntries().isNotEmpty()
+            list.addView(infoCard(
+                if (hasEntries) "本组复习完成" else "还没有复习内容",
+                if (hasEntries) {
+                    "今天到期的内容已经完成。新查的单词和短语会自动加入复习。"
+                } else {
+                    "先在学习页点击字幕里的单词或短语，它们会自动进入单词本和今日复习。"
+                }
+            ))
+            if (hasEntries) {
+                list.addView(controlButton("检查下一组") { showTodayReview(resetSession = true) })
+            }
+        } else {
+            val stats = readTodayReviewStats()
+            list.addView(TextView(this).apply {
+                text = buildString {
+                    append("本组 ${reviewSessionIndex + 1}/${reviewSessionEntries.size} · 今日还剩 ${dueReviewCount()} 个")
+                    if (stats.completed > 0) append("\n今日已完成 ${stats.completed} 个")
+                    stats.accuracyPercent?.let { append(" · 拼写正确率 $it%") }
+                }
+                textSize = 14f
+                setTextColor(0xFF52636A.toInt())
+                setPadding(4, 0, 4, 12)
+            })
+            list.addView(reviewCard(entry))
+        }
+        root.addView(ScrollView(this).apply { addView(list) }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+        setContentView(root)
+    }
+
+    private fun reviewCard(entry: WordbookEntry): View {
+        val previousState = readReviewStates()[reviewCardId(entry)]
+        val prompt = ReviewPromptBuilder.build(
+            term = entry.term,
+            meaning = entry.meaning.ifBlank { entry.definition },
+            englishText = entry.englishText.ifBlank { entry.sentence },
+            chineseText = entry.chineseText,
+            repetitions = previousState?.repetitions ?: 0
+        )
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(22, 20, 22, 20)
+            background = roundedBackground(0xFFFFFFFF.toInt(), 14f)
+            addView(TextView(context).apply {
+                text = prompt.mode.label
+                textSize = 13f
+                gravity = Gravity.CENTER
+                setTextColor(0xFFFFFFFF.toInt())
+                setPadding(14, 5, 14, 5)
+                background = roundedBackground(0xFF078A8F.toInt(), 20f)
+            }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                gravity = Gravity.CENTER_HORIZONTAL
+            })
+            addView(TextView(context).apply {
+                text = prompt.front
+                textSize = if (prompt.mode == ReviewPromptMode.MEANING) 30f else 22f
+                gravity = Gravity.CENTER
+                setTextColor(0xFF0B6F6A.toInt())
+                setPadding(0, 14, 0, 0)
+            })
+            if (entry.phonetic.isNotBlank() && (reviewAnswerShown || prompt.mode == ReviewPromptMode.MEANING)) {
+                addView(TextView(context).apply {
+                    text = entry.phonetic
+                    textSize = 15f
+                    gravity = Gravity.CENTER
+                    setTextColor(0xFF6A7A80.toInt())
+                    setPadding(0, 6, 0, 0)
+                })
+            }
+            addView(TextView(context).apply {
+                text = if (reviewAnswerShown) "核对答案后，根据实际掌握程度选择下面的按钮" else prompt.instruction
+                textSize = 15f
+                gravity = Gravity.CENTER
+                setTextColor(0xFF52636A.toInt())
+                setPadding(0, 18, 0, 12)
+            })
+            val audioRow = controlRow()
+            audioRow.addView(controlButton("听发音") { speakTerm(entry.term) })
+            audioRow.addView(controlButton("播放原句") { playReviewExample(entry) })
+            addView(audioRow)
+            if (!reviewAnswerShown) {
+                if (prompt.expectsTypedAnswer) {
+                    addView(EditText(context).apply {
+                        hint = "输入英文答案"
+                        textSize = 18f
+                        setSingleLine(true)
+                        setText(reviewTypedAnswer)
+                        setSelection(text.length)
+                        setPadding(16, 8, 16, 8)
+                        background = roundedBackground(0xFFF1F3F1.toInt(), 10f)
+                        addTextChangedListener(object : TextWatcher {
+                            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+                            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                                reviewTypedAnswer = s?.toString().orEmpty()
+                            }
+                            override fun afterTextChanged(s: Editable?) = Unit
+                        })
+                    }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(52)).apply {
+                        setMargins(0, 16, 0, 0)
+                    })
+                }
+                addView(Button(context).apply {
+                    text = if (prompt.expectsTypedAnswer) "检查答案" else "显示答案"
+                    textSize = 17f
+                    isAllCaps = false
+                    setTextColor(0xFFFFFFFF.toInt())
+                    background = roundedBackground(0xFF078A8F.toInt(), 12f)
+                    setOnClickListener {
+                        if (prompt.expectsTypedAnswer && reviewTypedAnswer.isBlank()) {
+                            Toast.makeText(context, "请先输入答案", Toast.LENGTH_SHORT).show()
+                            return@setOnClickListener
+                        }
+                        reviewAnswerCorrect = if (prompt.expectsTypedAnswer) {
+                            ReviewPromptBuilder.isCorrect(reviewTypedAnswer, entry.term)
+                        } else {
+                            null
+                        }
+                        reviewAnswerShown = true
+                        renderTodayReview()
+                    }
+                }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(54)).apply {
+                    setMargins(0, 18, 0, 0)
+                })
+            } else {
+                reviewAnswerCorrect?.let { correct ->
+                    addView(TextView(context).apply {
+                        text = if (correct) "回答正确" else "还没答对，正确答案是：${entry.term}"
+                        textSize = 17f
+                        gravity = Gravity.CENTER
+                        setTextColor(if (correct) 0xFF19723A.toInt() else 0xFFB13B32.toInt())
+                        setPadding(14, 14, 14, 14)
+                        background = roundedBackground(if (correct) 0xFFE7F5EA.toInt() else 0xFFFFECE9.toInt(), 10f)
+                    }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                        setMargins(0, 16, 0, 0)
+                    })
+                }
+                if (prompt.mode != ReviewPromptMode.MEANING) {
+                    addView(TextView(context).apply {
+                        text = entry.term
+                        textSize = 26f
+                        gravity = Gravity.CENTER
+                        setTextColor(0xFF0B6F6A.toInt())
+                        setPadding(0, 16, 0, 0)
+                    })
+                    if (entry.phonetic.isNotBlank()) {
+                        addView(TextView(context).apply {
+                            text = entry.phonetic
+                            textSize = 15f
+                            gravity = Gravity.CENTER
+                            setTextColor(0xFF6A7A80.toInt())
+                        })
+                    }
+                }
+                val answer = entry.meaning.ifBlank { entry.definition }.ifBlank { "暂无释义" }
+                addView(TextView(context).apply {
+                    text = answer
+                    textSize = 18f
+                    setTextColor(0xFF223238.toInt())
+                    setPadding(16, 16, 16, 16)
+                    background = roundedBackground(0xFFEAF4F0.toInt(), 10f)
+                }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                    setMargins(0, 16, 0, 0)
+                })
+                val example = buildString {
+                    append(entry.englishText.ifBlank { entry.sentence })
+                    if (entry.chineseText.isNotBlank()) append("\n").append(entry.chineseText)
+                }.trim()
+                if (example.isNotBlank()) {
+                    addView(TextView(context).apply {
+                        text = example
+                        textSize = 16f
+                        setTextColor(0xFF27383F.toInt())
+                        setPadding(16, 14, 16, 14)
+                        background = roundedBackground(0xFFF1F3F1.toInt(), 10f)
+                        setOnClickListener { playReviewExample(entry) }
+                    }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                        setMargins(0, 12, 0, 0)
+                    })
+                }
+                val ratings = controlRow()
+                ratings.addView(controlButton(reviewRatingLabel(previousState, ReviewRating.AGAIN, "忘记")) { rateReview(entry, ReviewRating.AGAIN) })
+                ratings.addView(controlButton(reviewRatingLabel(previousState, ReviewRating.HARD, "困难")) { rateReview(entry, ReviewRating.HARD) })
+                ratings.addView(controlButton(reviewRatingLabel(previousState, ReviewRating.GOOD, "记住")) { rateReview(entry, ReviewRating.GOOD) })
+                ratings.addView(controlButton(reviewRatingLabel(previousState, ReviewRating.EASY, "简单")) { rateReview(entry, ReviewRating.EASY) })
+                addView(ratings, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                    setMargins(0, 16, 0, 0)
+                })
+            }
+        }
+    }
+
+    private fun reviewRatingLabel(previous: ReviewState?, rating: ReviewRating, label: String): String {
+        val next = ReviewScheduler.next(previous, rating, System.currentTimeMillis())
+        val interval = if (next.intervalDays == 0) "10分" else "${next.intervalDays}天"
+        return "$label $interval"
+    }
+
+    private fun rateReview(entry: WordbookEntry, rating: ReviewRating) {
+        val id = reviewCardId(entry)
+        val previous = readReviewStates()[id]
+        recordReviewCompletion(reviewAnswerCorrect)
+        saveReviewState(id, ReviewScheduler.next(previous, rating, System.currentTimeMillis()))
+        reviewSessionIndex += 1
+        reviewAnswerShown = false
+        reviewTypedAnswer = ""
+        reviewAnswerCorrect = null
+        renderTodayReview()
+    }
+
+    private fun playReviewExample(entry: WordbookEntry) {
+        returnToReviewAfterExample = true
+        currentTab = MainTab.LEARNING
+        playWordbookExample(entry)
+    }
+
+    private fun returnFromTodayReview() {
+        showingWordbook = false
+        returnToReviewAfterExample = false
+        currentTab = MainTab.MINE
+        buildUi()
+    }
+
+    private fun reviewCardId(entry: WordbookEntry): String {
+        val raw = listOf(
+            entry.term.trim().lowercase(Locale.US),
+            entry.videoId,
+            entry.startMs.toString(),
+            entry.englishText.trim()
+        ).joinToString("\u001f")
+        return MessageDigest.getInstance("SHA-256")
+            .digest(raw.toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
+    }
+
+    private fun readReviewStates(): MutableMap<String, ReviewState> {
+        return runCatching {
+            val file = reviewStateFile()
+            if (!file.exists()) return mutableMapOf()
+            val root = JSONObject(file.readText(Charsets.UTF_8))
+            val states = mutableMapOf<String, ReviewState>()
+            val keys = root.keys()
+            while (keys.hasNext()) {
+                val id = keys.next()
+                val item = root.optJSONObject(id) ?: continue
+                states[id] = ReviewState(
+                    dueAtMs = item.optLong("dueAtMs", 0L),
+                    intervalDays = item.optInt("intervalDays", 0),
+                    ease = item.optDouble("ease", 2.5),
+                    repetitions = item.optInt("repetitions", 0),
+                    lapses = item.optInt("lapses", 0),
+                    lastReviewedAtMs = item.optLong("lastReviewedAtMs", 0L)
+                )
+            }
+            states
+        }.getOrElse { mutableMapOf() }
+    }
+
+    private fun saveReviewState(id: String, state: ReviewState) {
+        runCatching {
+            val file = reviewStateFile()
+            val root = if (file.exists()) JSONObject(file.readText(Charsets.UTF_8)) else JSONObject()
+            root.put(id, JSONObject().apply {
+                put("dueAtMs", state.dueAtMs)
+                put("intervalDays", state.intervalDays)
+                put("ease", state.ease)
+                put("repetitions", state.repetitions)
+                put("lapses", state.lapses)
+                put("lastReviewedAtMs", state.lastReviewedAtMs)
+            })
+            val temporary = File(filesDir, "$reviewStateFileName.tmp")
+            temporary.writeText(root.toString(), Charsets.UTF_8)
+            if (file.exists()) file.delete()
+            if (!temporary.renameTo(file)) {
+                file.writeText(root.toString(), Charsets.UTF_8)
+                temporary.delete()
+            }
+        }.onFailure {
+            Toast.makeText(this, "复习进度保存失败：${it.message}", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun reviewStateFile(): File = File(filesDir, reviewStateFileName)
+
+    private fun readTodayReviewStats(): ReviewDailyStats {
+        val today = chinaDateFormat("yyyy-MM-dd").format(Date())
+        val prefs = getSharedPreferences(prefsName, MODE_PRIVATE)
+        if (prefs.getString(reviewStatsDayKey, null) != today) return ReviewDailyStats(today)
+        return ReviewDailyStats(
+            day = today,
+            completed = prefs.getInt(reviewStatsCompletedKey, 0),
+            typedAttempts = prefs.getInt(reviewStatsAttemptsKey, 0),
+            typedCorrect = prefs.getInt(reviewStatsCorrectKey, 0)
+        )
+    }
+
+    private fun recordReviewCompletion(typedAnswerCorrect: Boolean?) {
+        val updated = readTodayReviewStats().record(typedAnswerCorrect)
+        getSharedPreferences(prefsName, MODE_PRIVATE)
+            .edit()
+            .putString(reviewStatsDayKey, updated.day)
+            .putInt(reviewStatsCompletedKey, updated.completed)
+            .putInt(reviewStatsAttemptsKey, updated.typedAttempts)
+            .putInt(reviewStatsCorrectKey, updated.typedCorrect)
+            .apply()
     }
 
     private fun showWordbook() {
@@ -1914,6 +2295,7 @@ class LearningActivity : Activity() {
         val snapshot = learningReturnSnapshot ?: return
         learningReturnSnapshot = null
         wordbookReturnDay = null
+        returnToReviewAfterExample = false
         pendingWordbookExample = null
         playingWordbookExample = false
         pendingResumePositionMs = snapshot.positionMs.coerceAtLeast(0)
@@ -1936,6 +2318,13 @@ class LearningActivity : Activity() {
         } else {
             showWordbookDay(day, entries)
         }
+    }
+
+    private fun returnToReviewSession() {
+        returnToReviewAfterExample = false
+        pendingWordbookExample = null
+        playingWordbookExample = false
+        showTodayReview(resetSession = false)
     }
 
     private fun findWordbookSubtitleIndex(entry: WordbookEntry): Int? {
@@ -2632,8 +3021,8 @@ class LearningActivity : Activity() {
                 error("服务 token 不匹配。服务窗口如果打印了 Auth token，App 地址必须在末尾加 ?token=那个token；本地局域网也可以重新运行脚本且不带 -UseAuth 来关闭 token。")
             }
             error(
-                "连接不上 Whisper 服务。USB 调试用 http://127.0.0.1:8765/transcribe 并执行 adb reverse；" +
-                    "同一局域网用电脑 Wi-Fi IP，例如 http://192.168.0.133:8765/transcribe。原始错误：${error.message}"
+                "连接不上 Whisper 服务。USB 调试用 http://127.0.0.1:8766/transcribe 并执行 adb reverse；" +
+                    "同一局域网用电脑 Wi-Fi IP，例如 http://192.168.0.133:8766/transcribe。原始错误：${error.message}"
             )
         }
     }
@@ -2664,7 +3053,7 @@ class LearningActivity : Activity() {
                 "上传被服务端提前拒绝。最常见原因是服务启用了 token，但 App 地址没有加 ?token=...；请用服务窗口打印的完整 App URL，或重新运行局域网脚本关闭 token。原始错误：$message"
             message.contains("Failed to connect", ignoreCase = true) ||
                 message.contains("Connection refused", ignoreCase = true) ->
-                "连接不上 Whisper 服务。USB 调试请确认服务在运行并已执行 adb reverse tcp:8765 tcp:8765；局域网请填电脑 Wi-Fi IP，例如 http://192.168.0.133:8765/transcribe，并确认防火墙允许访问。原始错误：$message"
+                "连接不上 Whisper 服务。USB 调试请确认服务在运行并已执行 adb reverse tcp:8766 tcp:8766；局域网请填电脑 Wi-Fi IP，例如 http://192.168.0.133:8766/transcribe，并确认防火墙允许访问。原始错误：$message"
             message.contains("unexpected end", ignoreCase = true) ||
                 message.contains("Connection reset", ignoreCase = true) ->
                 "上传连接中断。通常是电脑端 Whisper 服务中途退出、USB reverse 断开，或局域网不稳定；请重新启动服务后重试。原始错误：$message"
@@ -2969,9 +3358,10 @@ class LearningActivity : Activity() {
             isRunningOnEmulator() && (lower.contains("10.0.2.2") || lower.contains("127.0.0.1")) -> 0
             !isRunningOnEmulator() && lower.contains("127.0.0.1") -> 0
             lower.startsWith("http://192.168.") || lower.startsWith("http://10.") || lower.startsWith("http://172.") -> 1
-            lower.startsWith("http://") -> 2
-            lower.startsWith("https://") -> 3
-            else -> 4
+            ServicePairingConfig.isTailscaleUrl(url) -> 2
+            lower.startsWith("http://") -> 3
+            lower.startsWith("https://") -> 4
+            else -> 5
         }
     }
 
@@ -3052,7 +3442,7 @@ class LearningActivity : Activity() {
         }
         AlertDialog.Builder(this)
             .setTitle("Whisper 服务地址")
-            .setMessage("模拟器用 10.0.2.2。真机 USB 用 http://127.0.0.1:8765/transcribe，并先执行 adb reverse。电脑和手机同一局域网时，填电脑 Wi-Fi IP，例如 http://192.168.0.133:8765/transcribe。远程使用填公网 HTTPS 地址。")
+            .setMessage("v2.1.0 启动电脑服务后，会通过 USB 自动写入带 token 的 USB、局域网和 Tailscale 私网地址。通常无需手填；远程访问推荐 Tailscale Serve。只有明确启用公共隧道时才会写入公网地址。")
             .setView(input)
             .setPositiveButton("保存") { _, _ ->
                 getSharedPreferences(prefsName, MODE_PRIVATE)
@@ -3107,6 +3497,7 @@ class LearningActivity : Activity() {
         return when {
             url.contains("127.0.0.1") -> "USB"
             url.contains("10.0.2.2") -> "模拟器"
+            ServicePairingConfig.isTailscaleUrl(url) -> "Tailscale 私有网络"
             url.startsWith("https://") -> "公网"
             else -> "局域网"
         }

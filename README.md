@@ -9,6 +9,7 @@
 从 v2.0.2 开始，手机只负责可断点续传的音频上传和进度查询；电脑接收完整音频后会独立跑完识别与翻译。即使手机锁屏、App 被系统重建或网络暂时断开，电脑任务也不会中止，手机恢复连接后会继续显示同一个任务的进度并取回结果。
 v2.0.4 进一步解决运行中新增视频的调度问题：即使手机正在查询一个长视频的电脑处理进度，新加入的视频也会立即优先提取并上传音频、提交到电脑 FIFO 队列，然后手机再恢复原任务查询。电脑收到完整音频和任务 ID 后，即使手机锁屏、切换应用或断开连接，也会独立继续识别和翻译。
 v2.0.5 新增随电脑服务自动打开的本地网页仪表盘，可以直接看到当前处理的视频、阶段与总进度、预计剩余时间、FIFO 队列、最近任务、模型、GPU 和 USB/局域网/公网连接地址。
+v2.1.0 在保留 v2.0.6 WhisperX CUDA 字幕流水线和旧 APK 的基础上，新增主动回忆复习、USB 首次自动配对、持久 token 与 Tailscale Serve 私有固定地址；公网隧道改为明确选择后才开启。
 
 
 ## 适合谁使用
@@ -37,6 +38,10 @@ v2.0.5 新增随电脑服务自动打开的本地网页仪表盘，可以直接�
 
 点击当前英文句子里的单词，可以查看中文解释、音标、英文解释和例句，并播放单词发音。查过的单词会自动按日期保存到单词本。单词本里的例句来自原视频字幕，点击例句可以回到视频对应位置，复习时能看到真实语境。
 
+### 主动回忆和间隔复习
+
+“我的”页面在“单词本”下方提供“今日复习”。新词先进行释义回忆，之后依次练习原句填空、中译英和听音拼写；输入答案后会自动忽略大小写、首尾标点、连续空格和中英文撇号差异进行判定。每张卡可选择忘记、困难、记住或简单，系统按掌握程度安排 10 分钟或数天后的下一次复习。页面会显示当天完成数和拼写正确率，播放视频原句后可返回原来的复习卡继续。
+
 ### 后台批量处理
 
 “生成字幕中”页面支持一次选择多个视频。App 会先按添加顺序把这一批视频的音频全部分块上传到电脑，再依次提交电脑端 FIFO 队列；电脑只运行一个识别/翻译任务，完成后自动处理下一条。已经提交的整批任务不依赖手机保持在线，手机恢复网络时会继续查询并下载双语结果。
@@ -47,9 +52,48 @@ v2.0.5 新增随电脑服务自动打开的本地网页仪表盘，可以直接�
 
 ## 版本说明
 
+### v2.1.0
+
+v2.1.0 是面向愿意从 GitHub 获取项目、并希望长期安全使用电脑服务的推荐版本。它完整保留 v2.0.6 的 WhisperX 3.8.6 CUDA 对齐、识别质量门控、SaT 断句、词典和视频位置恢复能力，同时加入以下功能：
+
+- “我的”页面在“单词本”下方新增“今日复习”，提供释义回忆、原句填空、中译英和听音拼写，以及忘记/困难/记住/简单四档间隔复习。
+- 首次使用时，安装 v2.1.0 APK，把手机通过 USB 连接电脑并允许 USB 调试，然后启动电脑服务；脚本会建立 `adb reverse`，并把带 token 的 USB、局域网、Tailscale 私网以及显式启用的公网候选地址直接写入手机。
+- token 保存于未纳入 Git 的 `service_data_v2.1.0/service_auth_token.txt`，重启电脑服务后不再变化，因此已经配对的地址可继续使用。
+- 地址优先级为 `USB/模拟器 -> 局域网 -> Tailscale 私网 -> 手动或显式启用的公网 HTTPS`。手机端仍保留服务地址输入框，可以手动填写、测试和保存公网地址。
+- 默认不再启动 Cloudflare 临时公网隧道，也不会启用 Tailscale Funnel。Tailscale Serve 只对同一 tailnet 内、且被访问控制策略允许的设备开放，避免其他开源项目用户访问或上传文件到你的电脑。
+- v2.0.6 APK、电脑端脚本和数据目录完整保留，不会被 v2.1.0 覆盖。
+
+安装包位置：`release/app-v2.1.0.apk`
+
+如果用户没有 GitHub 账号，按项目建议继续使用完整保留的 v2.0.6 组合：`release/app-v2.0.6.apk` 与 `tools/versions/v2.0.6/start_service.ps1`。
+
+#### v2.1.0 首次 USB 自动配对
+
+1. 安装并至少打开一次 `release/app-v2.1.0.apk`。
+2. 在手机开发者选项中打开 USB 调试，连接电脑，并在手机上允许这台电脑调试。
+3. 在项目根目录运行：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools/versions/v2.1.0/start_service.ps1
+```
+
+PowerShell 出现 `Phone service addresses updated` 后，手机已收到地址，无需复制 token。以后服务会继续监测 USB 设备；重新插入手机时会自动恢复端口映射并刷新地址。Android 接收器要求系统级 `android.permission.DUMP`，因此只有 ADB shell/系统能够写入，普通第三方 App 无法伪造配对广播。
+
+#### Tailscale 私有固定地址
+
+电脑和手机安装 Tailscale、登录同一个 tailnet 后，启动脚本会尝试执行 `tailscale serve --bg 8766`，读取这台电脑稳定的 `*.ts.net` 名称并自动写入手机。Tailscale 未安装或未登录时，USB 和局域网仍正常使用。官方说明：[Tailscale Serve](https://tailscale.com/kb/1242/tailscale-serve) 仅在 tailnet 内提供服务；[Tailscale Funnel](https://tailscale.com/kb/1223/funnel) 才是公网入口，本项目不会自动启用 Funnel。
+
+如果确实需要临时公共地址，可显式运行：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools/versions/v2.1.0/start_service.ps1 -EnablePublicTunnel
+```
+
+也可以在手机“我的 -> 电脑端服务”里手动填写自己的公网 HTTPS `/transcribe?token=...` 地址并测试。公共地址意味着暴露面扩大，必须保留高强度 token，且不要在截图、Issue 或日志中公开完整 URL。
+
 ### v2.0.6
 
-v2.0.6 是当前推荐版本，手机端配套同版本的 v2.0.6 电脑服务；v2.0.5 电脑服务完整保留，仍可独立启动。
+v2.0.6 是完整保留版本，手机端配套同版本的 v2.0.6 电脑服务；v2.0.5 电脑服务也仍可独立启动。
 
 - Whisper 保留识别文本，但词级时间戳交给 WhisperX 3.8.6 的 wav2vec2 CTC 强制对齐；WhisperX 在独立 Python 3.11 环境中使用 CUDA，不可用时 v2.0.6 会明确报错，不会静默退回旧时间戳。
 - 恢复 faster-whisper 官方默认的 `compression_ratio_threshold=2.4`，并在 VAD 缺口恢复前剔除低对数概率、低词置信度的失败高温回退片段。
@@ -190,7 +234,7 @@ v1.0.0 是早期版本，功能集中在单个学习页面里。
 
 ## APK 与电脑端服务兼容性
 
-仓库同时保留旧版以及 v2.0.2、v2.0.3、v2.0.4、v2.0.5、v2.0.6 的版本化电脑端文件。不同版本请按下表成套使用，测试新版本时不需要覆盖旧源码。
+仓库同时保留旧版以及 v2.0.2 至 v2.1.0 的版本化电脑端文件。不同版本请按下表成套使用，测试新版本时不需要覆盖旧源码。
 
 | 手机 APK | 电脑端启动入口 | 实际服务源码 | 说明 |
 | --- | --- | --- | --- |
@@ -200,11 +244,12 @@ v1.0.0 是早期版本，功能集中在单个学习页面里。
 | `release/app-v2.0.3.apk` | `tools/versions/v2.0.3/start_service.ps1` | `tools/versions/v2.0.3/service.py` | 增加 SaT + spaCy 语义断句，并保留持久上传和 FIFO 队列 |
 | `release/app-v2.0.4.apk` | `tools/versions/v2.0.4/start_service.ps1` | `tools/versions/v2.0.4/service.py` | 增加运行中新增视频优先上传、连续后台锁、0.05 秒时间微调，以及服务重启后的地址/token 自动刷新 |
 | `release/app-v2.0.5.apk` | `tools/versions/v2.0.5/start_service.ps1` | `tools/versions/v2.0.5/service.py` | 保留版本；完整保留 v2.0.4 能力，并新增自动打开的本地网页仪表盘 |
-| `release/app-v2.0.6.apk` | `tools/versions/v2.0.6/start_service.ps1` | `tools/versions/v2.0.6/service.py` | 当前推荐组合；电脑端增加 WhisperX 3.8.6 CUDA 强制对齐、识别质量门控和 SaT Viterbi 断句 |
+| `release/app-v2.0.6.apk` | `tools/versions/v2.0.6/start_service.ps1` | `tools/versions/v2.0.6/service.py` | 完整保留；没有 GitHub 账号时建议使用此组合 |
+| `release/app-v2.1.0.apk` | `tools/versions/v2.1.0/start_service.ps1` | `tools/versions/v2.1.0/service.py` | 当前推荐；增加今日复习、USB 自动配对、持久 token、Tailscale 私网固定地址，公网默认关闭 |
 
 升级电脑端版本时，请先等待旧电脑端队列结束并按 `Ctrl + C` 关闭旧服务，再安装对应 APK，最后运行同版本启动脚本。旧 APK、启动脚本和服务源码都可以继续保留，但两个服务不能同时占用默认的 8766 端口。
 
-升级不会主动删除手机里已有的视频、字幕、学习进度或单词本。v2.0.6 默认使用独立的 `service_data_v2.0.6` 目录，v2.0.5 的 `service_data_v2.0.5` 不会被覆盖。
+升级不会主动删除手机里已有的视频、字幕、学习进度或单词本。v2.1.0 使用独立的 `service_data_v2.1.0` 目录，v2.0.6 的 `service_data_v2.0.6` 不会被覆盖。
 
 ## 推荐使用流程
 
@@ -287,6 +332,8 @@ v2.0.6 的离线查询主层是 ECDICT 中文词典与官方词形表，补充�
 
 单词本按日期整理，例句来自视频原句。点击例句可以回到对应视频位置，适合用真实语境复习单词。
 
+进入“我的 -> 今日复习”后，每组最多练习 20 张到期卡片。题型会随复习次数在释义回忆、原句填空、中译英和听音拼写之间轮换；原句无法安全挖空时会自动改用中文提示或听音拼写，不会生成没有答案的填空。回答后仍由学习者根据真实掌握程度选择忘记、困难、记住或简单，避免一次拼写失误直接替代记忆判断。
+
 ## 四个页面怎么用
 
 ### 学习
@@ -315,7 +362,7 @@ v2.0.6 的离线查询主层是 ECDICT 中文词典与官方词形表，补充�
 
 ### 我的
 
-我的页面包含单词本、使用说明、电脑端服务说明、作者信息、GitHub 链接、隐私说明和版本信息。
+我的页面包含单词本、今日复习、使用说明、电脑端服务说明、作者信息、GitHub 链接、隐私说明和版本信息。“今日复习”会显示待复习数量、当天完成数和已有拼写作答的正确率。
 
 GitHub 链接用于查看开源项目和下载最新版本安装包。
 
@@ -552,13 +599,14 @@ cd C:\tmp\video-english-learning-remote
 电脑端服务主要文件：
 
 ```text
-tools/versions/v2.0.6/start_service.ps1
-tools/versions/v2.0.6/install_whisperx_cuda.ps1
-tools/versions/v2.0.6/service.py
-tools/versions/v2.0.6/dashboard.html
-tools/versions/v2.0.6/whisperx_worker.py
-tools/versions/v2.0.6/semantic_caption_segmenter_v206.py
-tools/versions/v2.0.6/semantic_worker.py
+tools/versions/v2.1.0/start_service.ps1
+tools/versions/v2.1.0/install_whisperx_cuda.ps1
+tools/versions/v2.1.0/service.py
+tools/versions/v2.1.0/dashboard.html
+tools/versions/v2.1.0/whisperx_worker.py
+tools/versions/v2.1.0/semantic_caption_segmenter_v206.py
+tools/versions/v2.1.0/semantic_worker.py
+tools/versions/v2.0.6/start_service.ps1      v2.0.6 保留入口
 tools/versions/legacy/start_service.ps1          旧版入口（保留）
 tools/versions/legacy/service.py                 旧版服务（保留）
 tools/tests/integration/test_gpu_models.ps1
@@ -569,6 +617,8 @@ Android 端主要代码：
 ```text
 app/src/main/java/com/codex/videolearnenglish/LearningActivity.kt
 app/src/main/java/com/codex/videolearnenglish/CaptionGenerationService.kt
+app/src/main/java/com/codex/videolearnenglish/ServiceConfigReceiver.kt
+app/src/main/java/com/codex/videolearnenglish/ServicePairingConfig.kt
 ```
 
 ## 目录结构
@@ -585,7 +635,7 @@ README.md                    项目说明
 
 项目开源在 GitHub。用户可以通过“我的 -> GitHub”打开项目主页，查看说明、下载新版 APK、反馈问题或参与改进。
 
-如果你只是安装使用，推荐下载 `release/app-v2.0.6.apk`，并配套运行 v2.0.6 电脑服务。如果你想自己改代码，可以 clone 项目后用 Android Studio 打开。
+能够访问 GitHub 的用户推荐下载 `release/app-v2.1.0.apk`，并配套运行 v2.1.0 电脑服务；没有 GitHub 账号的用户建议继续使用完整保留的 v2.0.6 组合。如果你想自己改代码，可以 clone 项目后用 Android Studio 打开。
 
 ## 作者
 

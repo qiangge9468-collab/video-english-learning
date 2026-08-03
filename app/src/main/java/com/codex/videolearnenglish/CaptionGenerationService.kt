@@ -385,9 +385,10 @@ class CaptionGenerationService : Service() {
             isRunningOnEmulator() && (lower.contains("10.0.2.2") || lower.contains("127.0.0.1")) -> 0
             !isRunningOnEmulator() && lower.contains("127.0.0.1") -> 0
             lower.startsWith("http://192.168.") || lower.startsWith("http://10.") || lower.startsWith("http://172.") -> 1
-            lower.startsWith("http://") -> 2
-            lower.startsWith("https://") -> 3
-            else -> 4
+            ServicePairingConfig.isTailscaleUrl(url) -> 2
+            lower.startsWith("http://") -> 3
+            lower.startsWith("https://") -> 4
+            else -> 5
         }
     }
 
@@ -435,6 +436,7 @@ class CaptionGenerationService : Service() {
         return when {
             url.contains("127.0.0.1") -> "USB"
             url.contains("10.0.2.2") -> "模拟器"
+            ServicePairingConfig.isTailscaleUrl(url) -> "Tailscale 私有网络"
             url.startsWith("https://") -> "公网"
             else -> "局域网"
         }
@@ -470,8 +472,8 @@ class CaptionGenerationService : Service() {
                 error("服务 token 不匹配。服务窗口如果打印了 Auth token，App 地址必须在末尾加 ?token=那个token；本地局域网也可以重新运行脚本且不带 -UseAuth 来关闭 token。")
             }
             error(
-                "连接不上 Whisper 服务。USB 调试用 http://127.0.0.1:8765/transcribe 并执行 adb reverse；" +
-                    "同一局域网用电脑 Wi-Fi IP，例如 http://192.168.0.133:8765/transcribe。原始错误：${error.message}"
+                "连接不上 Whisper 服务。USB 调试用 http://127.0.0.1:8766/transcribe 并执行 adb reverse；" +
+                    "同一局域网用电脑 Wi-Fi IP，例如 http://192.168.0.133:8766/transcribe。原始错误：${error.message}"
             )
         }
     }
@@ -1316,7 +1318,7 @@ class CaptionGenerationService : Service() {
                 "上传被服务端提前拒绝。最常见原因是服务启用了 token，但 App 地址没有加 ?token=...；请用服务窗口打印的完整 App URL，或重新运行局域网脚本关闭 token。原始错误：$message"
             message.contains("Failed to connect", ignoreCase = true) ||
                 message.contains("Connection refused", ignoreCase = true) ->
-                "连接不上 Whisper 服务。USB 调试请确认服务在运行并已执行 adb reverse tcp:8765 tcp:8765；局域网请填电脑 Wi-Fi IP，例如 http://192.168.0.133:8765/transcribe，并确认防火墙允许访问。原始错误：$message"
+                "连接不上 Whisper 服务。USB 调试请确认服务在运行并已执行 adb reverse tcp:8766 tcp:8766；局域网请填电脑 Wi-Fi IP，例如 http://192.168.0.133:8766/transcribe，并确认防火墙允许访问。原始错误：$message"
             message.contains("unexpected end", ignoreCase = true) ||
                 message.contains("Connection reset", ignoreCase = true) ->
                 "上传连接中断。通常是电脑端 Whisper 服务中途退出、USB reverse 断开，或局域网不稳定；请重新启动服务后重试。原始错误：$message"
@@ -1481,8 +1483,8 @@ class CaptionGenerationService : Service() {
         private const val PREFS_NAME = "video_english_learning"
         private const val SERVICE_URL_KEY = "whisper_service_url"
         private const val SERVICE_URL_CANDIDATES_KEY = "whisper_service_url_candidates"
-        private const val PHONE_USB_SERVICE_URL = "http://127.0.0.1:8765/transcribe"
-        private const val EMULATOR_SERVICE_URL = "http://10.0.2.2:8765/transcribe"
+        private const val PHONE_USB_SERVICE_URL = "http://127.0.0.1:8766/transcribe"
+        private const val EMULATOR_SERVICE_URL = "http://10.0.2.2:8766/transcribe"
     }
 
     private class TaskPausedException : RuntimeException("task paused")
