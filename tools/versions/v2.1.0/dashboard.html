@@ -148,6 +148,7 @@
       (config?.lan_urls||[]).forEach(u=>urls.push(["局域网",u]));
       if(config?.tailscale_url) urls.push(["Tailscale 私网",config.tailscale_url]);
       if(config?.public_url) urls.push(["公网",config.public_url]);
+      if(config?.github_config_url) urls.push(["GitHub 无 USB 发现",config.github_config_url]);
       $("urls").innerHTML=urls.length?urls.map(([label,url],i)=>`<div class="url"><span>${esc(label)}</span><code title="${esc(url)}">${esc(url.replace(/token=[^&]+/,"token=••••••••"))}</code><button class="copy" data-index="${i}">复制</button></div>`).join(""):`<div class="empty">暂无可用地址</div>`;
       $("urls").querySelectorAll(".copy").forEach((b,i)=>b.onclick=async()=>{await navigator.clipboard.writeText(urls[i][1]);b.textContent="已复制";setTimeout(()=>b.textContent="复制",1200)});
     }

@@ -143,6 +143,7 @@ class LearningActivity : Activity() {
     private val prefsName = "video_english_learning"
     private val serviceUrlKey = "whisper_service_url"
     private val serviceUrlCandidatesKey = "whisper_service_url_candidates"
+    private val serviceConfigGithubUrlKey = "service_config_github_url"
     private val lastVideoUriKey = "last_video_uri"
     private val lastVideoPositionKey = "last_video_position_ms"
     private val lastVideoSelectedIndexKey = "last_video_selected_index"
@@ -736,7 +737,7 @@ class LearningActivity : Activity() {
             reviewDescription
         ) { showTodayReview() })
         list.addView(menuCard("使用说明", "进入详细说明页：学习、批量生成字幕、电脑端服务、导出字幕") { showUsagePage() })
-        list.addView(menuCard("电脑端服务", "运行 tools/versions/v2.1.0/start_service.ps1 后，App 会优先使用 USB / 局域网 / Tailscale，也可手动填写公网地址") { showServiceUrlDialog() })
+        list.addView(menuCard("电脑端服务", "首次 USB 配对后，App 会自动使用 USB / 局域网 / Tailscale，并从 GitHub 获取每次启动后的最新公网地址") { showServiceUrlDialog() })
         list.addView(menuCard("下载最新版", "打开 GitHub 项目 release 文件夹，下载作者更新的最新 APK") {
             openGitHubProject()
         })
@@ -1263,7 +1264,7 @@ class LearningActivity : Activity() {
         list.addView(infoCard("学习页", "导入或从“已完成”打开视频后，可以播放、上一句、下一句、循环、复读、早/晚 0.05 秒、切换英文/中文/双语、查单词和导出字幕。"))
         list.addView(infoCard("生成字幕中", "点“添加视频”可以一次选择多个视频。App 会后台依次提取音频，上传到电脑端 Whisper，生成英文字幕后自动调用电脑端翻译成中文。任务失败会自动续跑数次，也可以手动暂停、继续或重试。"))
         list.addView(infoCard("已完成", "已生成字幕的视频会集中在这里。可以开始学习、导出字幕、重新电脑端翻译或删除记录。删除时可选择只删任务记录，或连本地字幕缓存一起删除。"))
-        list.addView(infoCard("电脑端服务", "在电脑 PowerShell 运行：\ncd C:\\tmp\\video-english-learning-remote\npowershell -ExecutionPolicy Bypass -File tools/versions/v2.1.0/start_service.ps1\n\n首次 USB 连接会自动写入 USB、局域网和 Tailscale 地址；也可手动填写公网地址。PowerShell 窗口不要关闭。"))
+        list.addView(infoCard("电脑端服务", "在电脑 PowerShell 运行：\ncd C:\\tmp\\video-english-learning-remote\npowershell -ExecutionPolicy Bypass -File tools/versions/v2.1.0/start_service.ps1\n\n首次 USB 配对会写入持久 token 和个人 GitHub 配置地址；以后没有 USB 时也会自动获取本次公网地址。仍可手动填写公网地址。PowerShell 窗口不要关闭。"))
         list.addView(infoCard("单词本", "在学习页点当前句里的单词或短语会自动保存。可在“我的 > 单词本”按日期复习，并跳回原视频例句。"))
         list.addView(infoCard("今日复习", "入口位于“我的 > 单词本”下面。题型会在释义回忆、原句填空、中译英和听音拼写之间轮换；输入题会自动检查答案。核对后选择忘记、困难、记住或简单，系统会安排下次复习并统计当天完成数和拼写正确率。可随时播放视频原句并返回当前卡片。"))
         list.addView(infoCard("下载最新版", "在 GitHub 的 release 文件夹下载最新 APK：\nhttps://github.com/qiangge9468-collab/video-english-learning/tree/main/release"))
@@ -1286,7 +1287,7 @@ class LearningActivity : Activity() {
             在电脑 PowerShell 运行：
             cd C:\tmp\video-english-learning-remote
             powershell -ExecutionPolicy Bypass -File tools/versions/v2.1.0/start_service.ps1
-            首次 USB 连接会自动写入 USB、局域网和 Tailscale 地址；也可手动填写公网地址。PowerShell 窗口不要关闭。
+            首次 USB 配对会写入持久 token 和个人 GitHub 配置地址；以后没有 USB 时也会自动获取本次公网地址。仍可手动填写公网地址。PowerShell 窗口不要关闭。
 
             5. 单词本
             在学习页点当前句里的单词或短语会自动保存。可在“我的 > 单词本”按日期复习，并跳回原视频例句。
@@ -3394,23 +3395,33 @@ class LearningActivity : Activity() {
         }
     }
 
+    private fun githubDiscoveredServiceUrl(knownUrls: Collection<String>): String? {
+        val discoveryUrl = getSharedPreferences(prefsName, MODE_PRIVATE)
+            .getString(serviceConfigGithubUrlKey, null).orEmpty().trim()
+        if (!ServicePairingConfig.isAllowedDiscoveryUrl(discoveryUrl)) return null
+        val separator = if (discoveryUrl.contains('?')) '&' else '?'
+        val fetchUrl = "$discoveryUrl${separator}t=${System.currentTimeMillis()}"
+        val item = JSONObject(requestJobJson(URL(fetchUrl)))
+        if (item.optInt("schema_version") != ServicePairingConfig.SCHEMA_VERSION) return null
+        return ServicePairingConfig.buildDiscoveredPublicUrl(
+            item.optString("public_base_url"), knownUrls
+        )
+    }
+
     private fun selectReachableServiceUrl(candidates: List<String>): String {
-        val expanded = linkedSetOf<String>()
-        candidates.forEach { candidate ->
-            if (candidate.isNotBlank()) expanded += candidate
-            runCatching {
-                val configured = configuredServiceUrls(candidate)
-                if (configured.isNotEmpty()) {
-                    saveServiceUrlCandidates(configured)
-                    expanded.addAll(configured)
-                }
-            }
+        val expanded = linkedSetOf<String>().apply {
+            addAll(candidates.filter { it.isNotBlank() })
         }
         val errors = mutableListOf<String>()
         for (url in expanded.sortedWith(compareBy { serviceUrlPriority(it) })) {
             runCatching {
                 requestJobJson(URL(pingUrl(url)))
             }.onSuccess {
+                runCatching { configuredServiceUrls(url) }.getOrDefault(emptyList()).let { configured ->
+                    if (configured.isNotEmpty()) {
+                        saveServiceUrlCandidates((expanded + configured).toList())
+                    }
+                }
                 getSharedPreferences(prefsName, MODE_PRIVATE)
                     .edit()
                     .putString(serviceUrlKey, url)
@@ -3418,6 +3429,21 @@ class LearningActivity : Activity() {
                 return url
             }.onFailure { error ->
                 errors += "${url}: ${error.message}"
+            }
+        }
+        val discoveredUrl = runCatching { githubDiscoveredServiceUrl(expanded) }.getOrNull()
+        if (discoveredUrl != null && discoveredUrl !in expanded) {
+            runCatching {
+                requestJobJson(URL(pingUrl(discoveredUrl)))
+            }.onSuccess {
+                saveServiceUrlCandidates((expanded + discoveredUrl).toList())
+                getSharedPreferences(prefsName, MODE_PRIVATE)
+                    .edit()
+                    .putString(serviceUrlKey, discoveredUrl)
+                    .apply()
+                return discoveredUrl
+            }.onFailure { error ->
+                errors += "GitHub 自动发现公网：${error.message}"
             }
         }
         error("所有 Whisper 地址都连接失败。${errors.takeLast(3).joinToString("；")}")
@@ -3442,7 +3468,7 @@ class LearningActivity : Activity() {
         }
         AlertDialog.Builder(this)
             .setTitle("Whisper 服务地址")
-            .setMessage("v2.1.0 启动电脑服务后，会通过 USB 自动写入带 token 的 USB、局域网和 Tailscale 私网地址。通常无需手填；远程访问推荐 Tailscale Serve。只有明确启用公共隧道时才会写入公网地址。")
+            .setMessage("v2.1.0 首次通过 USB 配对后会保存持久 token 和个人 GitHub 配置地址。以后即使没有连接 USB，App 也会从 GitHub 获取电脑本次启动生成的最新公网地址。仍可在这里手动填写并测试公网地址。")
             .setView(input)
             .setPositiveButton("保存") { _, _ ->
                 getSharedPreferences(prefsName, MODE_PRIVATE)

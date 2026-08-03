@@ -18,12 +18,15 @@ class ServiceConfigReceiver : BroadcastReceiver() {
         val raw = config.optJSONArray("transcribe_urls") ?: return
         val urls = ServicePairingConfig.sanitizeUrls((0 until raw.length()).map { raw.optString(it) })
         if (urls.isEmpty()) return
+        val discoveryUrl = config.optString("github_config_url").trim()
+            .takeIf(ServicePairingConfig::isAllowedDiscoveryUrl)
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
             .putString(SERVICE_URL_KEY, urls.first())
             .putString(SERVICE_URL_CANDIDATES_KEY, JSONArray(urls).toString())
             .putString(CONFIG_SOURCE_KEY, "usb_adb")
             .putString(CONFIG_UPDATED_AT_KEY, config.optString("updated_at"))
             .putString(CONFIG_TAILSCALE_URL_KEY, config.optString("tailscale_url"))
+            .putString(CONFIG_GITHUB_URL_KEY, discoveryUrl.orEmpty())
             .apply()
     }
 
@@ -34,5 +37,6 @@ class ServiceConfigReceiver : BroadcastReceiver() {
         private const val CONFIG_SOURCE_KEY = "service_config_source"
         private const val CONFIG_UPDATED_AT_KEY = "service_config_updated_at"
         private const val CONFIG_TAILSCALE_URL_KEY = "service_config_tailscale_url"
+        private const val CONFIG_GITHUB_URL_KEY = "service_config_github_url"
     }
 }
