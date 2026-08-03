@@ -19,6 +19,8 @@ class PrivatePairingV210Tests(unittest.TestCase):
         cls.activity = (ROOT / "app" / "src" / "main" / "java" / "com" / "codex" /
                         "videolearnenglish" / "LearningActivity.kt").read_text(encoding="utf-8")
 
+        cls.pairing = (ROOT / "app" / "src" / "main" / "java" / "com" / "codex" /
+                       "videolearnenglish" / "ServicePairingConfig.kt").read_text(encoding="utf-8")
     def test_v210_is_independent_and_v206_is_preserved(self):
         self.assertTrue((V210 / "service.py").is_file())
         self.assertTrue((V206 / "service.py").is_file())
@@ -28,12 +30,18 @@ class PrivatePairingV210Tests(unittest.TestCase):
     def test_public_address_is_default_and_github_discovery_has_no_token(self):
         self.assertIn("[switch]$NoPublicTunnel", self.launcher)
         self.assertIn("$publicTunnelEnabled = -not $NoPublicTunnel", self.launcher)
-        self.assertIn("gist create", self.launcher)
-        self.assertIn("gist edit", self.launcher)
+        self.assertIn('api --method $Method $Endpoint', self.launcher)
+        self.assertIn('"POST" -Endpoint "gists"', self.launcher)
+        self.assertIn('"PATCH" -Endpoint "gists/$gistId"', self.launcher)
+        self.assertNotIn("gist create", self.launcher)
         self.assertIn("github_config_url", self.launcher)
         self.assertIn("public_base_url", self.launcher)
         self.assertNotIn("token = $token", self.launcher)
         self.assertIn("serve --bg $Port", self.launcher)
+        self.assertIn("b3f5221fbc3e95270951695b92aaa84c", self.launcher)
+        self.assertIn("b3f5221fbc3e95270951695b92aaa84c", self.pairing)
+        self.assertIn("preferredDiscoveryUrl", self.activity)
+        self.assertIn("preferredDiscoveryUrl", (ROOT / "app" / "src" / "main" / "java" / "com" / "codex" / "videolearnenglish" / "CaptionGenerationService.kt").read_text(encoding="utf-8"))
 
     def test_token_is_persistent_and_runtime_data_is_not_shared(self):
         self.assertIn('service_data_v2.1.0', self.launcher)

@@ -35,4 +35,17 @@ class ServicePairingConfigTest {
         assertFalse(ServicePairingConfig.isAllowedDiscoveryUrl("https://example.com/config.json"))
         assertEquals(null, ServicePairingConfig.buildDiscoveredPublicUrl("https://evil.example.com", known))
     }
+
+    @Test fun usesOfficialDiscoveryWhenOldPairingHasNoSavedGist() {
+        assertEquals(
+            ServicePairingConfig.DEFAULT_DISCOVERY_URL,
+            ServicePairingConfig.preferredDiscoveryUrl(null)
+        )
+        val personal = "https://gist.githubusercontent.com/another-user/abcdef/raw/service-config.json"
+        assertEquals(personal, ServicePairingConfig.preferredDiscoveryUrl(personal))
+        assertEquals(
+            ServicePairingConfig.DEFAULT_DISCOVERY_URL,
+            ServicePairingConfig.preferredDiscoveryUrl("https://evil.example.com/config.json")
+        )
+    }
 }

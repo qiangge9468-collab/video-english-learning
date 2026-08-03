@@ -6,6 +6,8 @@ object ServicePairingConfig {
     const val ACTION_APPLY = "com.codex.videolearnenglish.APPLY_SERVICE_CONFIG"
     const val EXTRA_CONFIG_BASE64 = "config_base64"
     const val SCHEMA_VERSION = 1
+    const val DEFAULT_DISCOVERY_URL =
+        "https://gist.githubusercontent.com/qiangge9468-collab/b3f5221fbc3e95270951695b92aaa84c/raw/service-config.json"
 
     fun sanitizeUrls(urls: Iterable<String>): List<String> = urls
         .map { it.trim() }
@@ -23,6 +25,11 @@ object ServicePairingConfig {
             uri.rawUserInfo == null &&
             uri.host.orEmpty().lowercase() in setOf("gist.githubusercontent.com", "raw.githubusercontent.com")
     }.getOrDefault(false)
+    fun preferredDiscoveryUrl(savedUrl: String?): String =
+        savedUrl.orEmpty().trim()
+            .takeIf(::isAllowedDiscoveryUrl)
+            ?: DEFAULT_DISCOVERY_URL
+
 
     fun buildDiscoveredPublicUrl(publicBase: String, knownUrls: Iterable<String>): String? {
         val token = knownUrls.asSequence().mapNotNull(::tokenFromUrl).firstOrNull() ?: return null

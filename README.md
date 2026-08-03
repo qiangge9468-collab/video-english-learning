@@ -60,7 +60,7 @@ v2.1.0 是面向愿意从 GitHub 获取项目、并希望长期安全使用电�
 - 首次使用时，安装 v2.1.0 APK，把手机通过 USB 连接电脑并允许 USB 调试，然后启动电脑服务；脚本会建立 `adb reverse`，并把带 token 的 USB、局域网、Tailscale 私网、公网候选地址及个人 GitHub 配置地址直接写入手机。
 - token 保存于未纳入 Git 的 `service_data_v2.1.0/service_auth_token.txt`，重启电脑服务后不再变化，因此已经配对的地址可继续使用。
 - 地址优先级为 `USB/模拟器 -> 局域网 -> Tailscale 私网 -> 手动公网 HTTPS -> GitHub 自动发现的公网 HTTPS`。手机端仍保留服务地址输入框，可以手动填写、测试和保存公网地址。
-- 默认启动 Cloudflare 临时公网隧道，并把不含 token 的基础地址发布到当前 GitHub 用户自己的 secret（不公开列出）Gist。token 只保存在电脑和已配对手机中，不会上传 GitHub；Tailscale Funnel 仍不会启用。
+- 默认启动 Cloudflare 临时公网隧道，并通过 GitHub REST API 把不含 token 的基础地址发布到固定 Gist。官方 APK 内置作者的无 token 发现入口；其他用户首次 USB 配对后会保存自己的 Gist 地址。token 只保存在电脑和已配对手机中，不会上传 GitHub；Tailscale Funnel 仍不会启用。
 - v2.0.6 APK、电脑端脚本和数据目录完整保留，不会被 v2.1.0 覆盖。
 
 安装包位置：`release/app-v2.1.0.apk`
@@ -83,14 +83,14 @@ PowerShell 出现 `Phone service addresses updated` 后，手机已收到地址�
 
 v2.1.0 的目标是：电脑每次启动服务后，即使手机没有通过 USB 连接，也能自动取得本次新生成的 Cloudflare 公网地址。
 
-1. 电脑安装 [GitHub CLI](https://cli.github.com/) 并执行一次 `gh auth login`。启动脚本使用当前登录账号创建一个个人 secret Gist。
-2. 手机仍需完成一次上面的 USB 配对，以安全取得持久 token 和这个 Gist 的固定 raw 地址。
-3. 以后每次启动 v2.1.0 服务，脚本默认启动 Cloudflare Tunnel，并更新同一个 Gist 中的 `public_base_url`。
-4. 手机无法连接 USB、局域网、Tailscale 或已保存公网地址时，会读取 Gist、拼接手机本地保存的 token，再测试最新公网地址。请求附带时间参数，避免 GitHub raw 缓存返回旧内容。
+1. 电脑安装 [GitHub CLI](https://cli.github.com/) 并执行一次 `gh auth login`。启动脚本使用当前登录账号维护一个固定 Gist。
+2. 第一次安装时手机仍需完成一次 USB 配对，以安全取得持久 token。已经配对但旧补丁没有成功写入 Gist 地址的手机，只需安装修复后的 v2.1.0 APK；官方固定发现入口会自动补救，不需要再次插 USB。
+3. 以后每次启动 v2.1.0 服务，脚本默认启动 Cloudflare Tunnel，并通过 `gh api` 更新同一个 Gist 中的 `public_base_url`。这里不再解析 `gh gist create/edit` 的控制台进度文本，兼容 Windows PowerShell 5.1 的 `ErrorActionPreference=Stop`。
+4. 手机无法连接 USB、局域网、Tailscale 或已保存公网地址时，会读取 Gist、拼接手机本地保存的 token，再测试最新公网地址。请求附带时间参数，避免 GitHub raw 缓存返回旧内容；全程不要求手动填写公网地址。
 
 Gist 只保存类似 `https://xxxx.trycloudflare.com` 的基础地址和更新时间，不保存 `/transcribe?token=...`，因此其他人即使知道配置地址，也不能通过它取得上传权限。secret Gist 是“不公开列出”而非端到端加密；真正控制访问的是随机持久 token。不要在截图、Issue 或日志中公开完整带 token 的服务 URL。
 
-每个开源项目用户都使用自己 `gh auth login` 的 GitHub 账号和自己的 Gist，不会读取作者账号的配置，也不会把文件上传到作者电脑。没有 GitHub 账号的用户建议继续使用完整保留的 v2.0.6。
+官方 APK 的固定入口只公开作者当前的基础域名，不包含授权 token；其他用户没有作者 token，因此不能上传到作者电脑。开源项目用户首次 USB 配对后会优先保存并使用自己 `gh auth login` 账号下的 Gist。没有 GitHub 账号的用户建议继续使用完整保留的 v2.0.6。
 
 如果不想启动公网隧道，可运行：
 
@@ -477,7 +477,7 @@ https://xxxx.trycloudflare.com
 tools/runtime/v2.1.0/latest_service_urls.txt
 ```
 
-Cloudflare 免费临时地址每次启动可能变化，但已完成一次 USB 配对的 v2.1.0 App 会从固定 Gist 地址自动读取最新基础地址，并和手机本地 token 组合，无需再次插 USB 或手动填写。如果 GitHub CLI 未登录，脚本会明确提示，此时仍可在手机“我的 -> 电脑端服务”中手动保存完整公网地址。
+Cloudflare 免费临时地址每次启动可能变化，但已完成一次 USB 配对的 v2.1.0 App 会从固定 Gist 地址自动读取最新基础地址，并和手机本地 token 组合，无需再次插 USB 或手动填写。官方 APK 对旧配对缺失 Gist 地址的情况也有固定回退。如果 GitHub CLI 未登录或 GitHub API 更新失败，脚本会明确提示；只有这种异常情况下才需要临时手动保存完整公网地址。
 
 如果电脑没有安装 `cloudflared`，可以安装：
 

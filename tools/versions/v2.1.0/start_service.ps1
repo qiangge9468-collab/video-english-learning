@@ -161,6 +161,10 @@ $runtimeStatus = Join-Path $projectRoot "tools\runtime\v2.1.0\status.json"
 $latestUrlsFile = Join-Path $projectRoot "tools\runtime\v2.1.0\latest_service_urls.txt"
 $githubConfigStateFile = Join-Path $dataDir "github_service_config_state.json"
 $githubConfigPayloadFile = Join-Path $dataDir "service-config.json"
+$githubApiRequestFile = Join-Path $dataDir "github_service_config_request.json"
+$githubApiErrorFile = Join-Path $dataDir "github_service_config_error.log"
+$officialDiscoveryLogin = "qiangge9468-collab"
+$officialDiscoveryGistId = "b3f5221fbc3e95270951695b92aaa84c"
 $runtimeDir = Split-Path -Parent $runtimeConfig
 if (-not (Test-Path -LiteralPath $runtimeDir)) { New-Item -ItemType Directory -Path $runtimeDir -Force | Out-Null }
 $env:WHISPER_RUNTIME_CONFIG = $runtimeConfig
@@ -212,6 +216,42 @@ function Get-GitHubConfigUrl {
     return ""
 }
 
+function Invoke-GhApiJson {
+    param(
+        [string]$Gh,
+        [string]$Method,
+        [string]$Endpoint,
+        [string]$BodyFile = ""
+    )
+    Remove-Item -LiteralPath $githubApiErrorFile -ErrorAction SilentlyContinue
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        if ($BodyFile) {
+            $output = & $Gh api --method $Method $Endpoint --input $BodyFile 2>$githubApiErrorFile
+        } else {
+            $output = & $Gh api --method $Method $Endpoint 2>$githubApiErrorFile
+        }
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+    if ($exitCode -ne 0) {
+        $details = if (Test-Path -LiteralPath $githubApiErrorFile) {
+            (Get-Content -LiteralPath $githubApiErrorFile -Raw -ErrorAction SilentlyContinue).Trim()
+        } else { "" }
+        if (-not $details) { $details = "gh api exited with code $exitCode" }
+        throw $details
+    }
+    $jsonText = (@($output) -join "`n").Trim()
+    if (-not $jsonText) { throw "GitHub API returned an empty response" }
+    try {
+        return $jsonText | ConvertFrom-Json
+    } catch {
+        throw "GitHub API returned invalid JSON: $($_.Exception.Message)"
+    }
+}
+
 function Publish-GitHubServiceConfig {
     param([string]$PublicBase)
     if (-not $PublicBase) { return Get-GitHubConfigUrl }
@@ -220,40 +260,70 @@ function Publish-GitHubServiceConfig {
         Write-Host "GitHub CLI was not found; public URL cannot be auto-published. Install gh or enter the URL manually." -ForegroundColor Yellow
         return Get-GitHubConfigUrl
     }
-    & $gh auth status --hostname github.com 1>$null 2>$null
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "GitHub CLI is not signed in; run gh auth login once to enable no-USB address discovery." -ForegroundColor Yellow
-        return Get-GitHubConfigUrl
-    }
-    $payload = [ordered]@{
-        schema_version = 1
-        service_version = "2.1.0"
-        updated_at = (Get-Date).ToUniversalTime().ToString("o")
-        expires_at = (Get-Date).ToUniversalTime().AddHours(24).ToString("o")
-        public_base_url = $PublicBase.TrimEnd([char]47)
-    }
-    Write-TextFileAtomic -Path $githubConfigPayloadFile -Lines @($payload | ConvertTo-Json -Depth 4)
     try {
-        $state = Read-GitHubConfigState
-        $gistId = if ($state) { [string]$state.gist_id } else { "" }
-        if ($gistId) {
-            & $gh gist edit $gistId --filename service-config.json $githubConfigPayloadFile 1>$null 2>$null
-            if ($LASTEXITCODE -ne 0) { throw "gh gist edit failed" }
-        } else {
-            $gistUrl = (& $gh gist create $githubConfigPayloadFile --desc "Video English Learning private service discovery (URL only, no token)" 2>$null | Select-Object -Last 1).Trim()
-            if ($LASTEXITCODE -ne 0 -or -not $gistUrl) { throw "gh gist create failed" }
-            $gistId = ($gistUrl.TrimEnd([char]47) -split "/")[-1]
+        $user = Invoke-GhApiJson -Gh $gh -Method "GET" -Endpoint "user"
+        $login = [string]$user.login
+        if (-not $login) { throw "GitHub login could not be resolved" }
+
+        $payload = [ordered]@{
+            schema_version = 1
+            service_version = "2.1.0"
+            updated_at = (Get-Date).ToUniversalTime().ToString("o")
+            expires_at = (Get-Date).ToUniversalTime().AddHours(24).ToString("o")
+            public_base_url = $PublicBase.TrimEnd([char]47)
         }
-        $login = (& $gh api user --jq .login 2>$null | Select-Object -First 1).Trim()
-        if (-not $login -or -not $gistId) { throw "could not resolve GitHub user or gist id" }
+        [string]$payloadJson = $payload | ConvertTo-Json -Depth 4
+        [System.IO.File]::WriteAllText(
+            $githubConfigPayloadFile,
+            $payloadJson,
+            (New-Object System.Text.UTF8Encoding($false))
+        )
+
+        $state = Read-GitHubConfigState
+        $gistId = if ($state -and $state.gist_id) { [string]$state.gist_id } else { "" }
+        if (-not $gistId -and $login -ieq $officialDiscoveryLogin) {
+            $gistId = $officialDiscoveryGistId
+        }
+
+        $request = [ordered]@{
+            files = [ordered]@{
+                "service-config.json" = [ordered]@{ content = $payloadJson }
+            }
+        }
+        if (-not $gistId) {
+            $request["description"] = "Video English Learning v2.1.0 service discovery (base URL only; no token)"
+            $request["public"] = $false
+        }
+        [string]$requestJson = $request | ConvertTo-Json -Depth 8
+        [System.IO.File]::WriteAllText(
+            $githubApiRequestFile,
+            $requestJson,
+            (New-Object System.Text.UTF8Encoding($false))
+        )
+
+        if ($gistId) {
+            $response = Invoke-GhApiJson -Gh $gh -Method "PATCH" -Endpoint "gists/$gistId" -BodyFile $githubApiRequestFile
+        } else {
+            $response = Invoke-GhApiJson -Gh $gh -Method "POST" -Endpoint "gists" -BodyFile $githubApiRequestFile
+            $gistId = [string]$response.id
+        }
+        if (-not $gistId) { throw "GitHub API returned no gist id" }
+
         $discoveryUrl = "https://gist.githubusercontent.com/$login/$gistId/raw/service-config.json"
-        $newState = [ordered]@{ gist_id = $gistId; discovery_url = $discoveryUrl; updated_at = (Get-Date).ToString("s") }
+        $newState = [ordered]@{
+            gist_id = $gistId
+            discovery_url = $discoveryUrl
+            updated_at = (Get-Date).ToString("s")
+        }
         Write-TextFileAtomic -Path $githubConfigStateFile -Lines @($newState | ConvertTo-Json -Depth 3)
         Write-Host "GitHub no-USB discovery updated: $discoveryUrl" -ForegroundColor Green
         return $discoveryUrl
     } catch {
         Write-Host "GitHub discovery update failed: $($_.Exception.Message). Public URL is still available for manual entry." -ForegroundColor Yellow
         return Get-GitHubConfigUrl
+    } finally {
+        Remove-Item -LiteralPath $githubApiErrorFile -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $githubApiRequestFile -ErrorAction SilentlyContinue
     }
 }
 
