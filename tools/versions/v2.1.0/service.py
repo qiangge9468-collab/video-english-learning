@@ -93,10 +93,11 @@ MIN_GAP_SECONDS = 0.03
 TRANSLATION_BATCH_SIZE = int(os.environ.get("TRANSLATION_BATCH_SIZE", "16"))
 MAX_UPLOAD_MB = int(os.environ.get("WHISPER_MAX_UPLOAD_MB", "2048"))
 AUTH_TOKEN = os.environ.get("WHISPER_AUTH_TOKEN", "").strip()
-PIPELINE_REVISION = "v2.1.0-whisperx-quality-aware-segmentation-2"
-SPEECH_GAP_MIN_SECONDS = float(os.environ.get("WHISPER_SPEECH_GAP_MIN_SECONDS", "2.0"))
+PIPELINE_REVISION = "v2.1.0-whisperx-speech-coverage-3"
+SPEECH_GAP_MIN_SECONDS = float(os.environ.get("WHISPER_SPEECH_GAP_MIN_SECONDS", "0.75"))
 SPEECH_GAP_MAX_SECONDS = float(os.environ.get("WHISPER_SPEECH_GAP_MAX_SECONDS", "18.0"))
 SPEECH_GAP_PAD_SECONDS = float(os.environ.get("WHISPER_SPEECH_GAP_PAD_SECONDS", "0.75"))
+SPEECH_GAP_MIN_OVERLAP_SECONDS = float(os.environ.get("WHISPER_SPEECH_GAP_MIN_OVERLAP_SECONDS", "0.45"))
 WHISPER_COMPRESSION_RATIO_THRESHOLD = float(os.environ.get("WHISPER_COMPRESSION_RATIO_THRESHOLD", "2.4"))
 WHISPER_REJECT_LOG_PROB = float(os.environ.get("WHISPER_REJECT_LOG_PROB", "-1.2"))
 WHISPER_REJECT_MEAN_WORD_PROB = float(os.environ.get("WHISPER_REJECT_MEAN_WORD_PROB", "0.20"))
@@ -1170,6 +1171,7 @@ def run_whisperx_alignment(video_path, raw_segments, language):
         debug = payload.get("debug")
         if not isinstance(aligned_segments, list) or not isinstance(aligned_words, list) or not isinstance(debug, dict):
             raise RuntimeError("WhisperX worker returned an invalid payload")
+        aligned_segments, aligned_words = rebuild_raw_transcription_artifacts(aligned_segments, aligned_words)
         return aligned_segments, aligned_words, debug
     finally:
         for path in (input_path, output_path):
@@ -1266,27 +1268,43 @@ def looks_like_prompt_echo(text, video_title):
     return candidate == title or (title in candidate and len(candidate) <= len(title) + 24)
 
 
-def find_uncovered_speech_gaps(raw_words, speech_ranges):
+def find_uncovered_speech_gaps(raw_words, speech_ranges, audio_duration=None):
+    """Return VAD speech that is not covered by an existing word timestamp."""
     words = sorted(raw_words, key=lambda item: (float(item["start"]), float(item["end"])))
+    if not words:
+        return []
+    audio_end = float(audio_duration) if audio_duration is not None else float("inf")
+    covered = [
+        (max(0.0, float(word["start"]) - 0.20), min(audio_end, float(word["end"]) + 0.20))
+        for word in words
+    ]
     gaps = []
-    for previous, following in zip(words, words[1:]):
-        start = float(previous["end"])
-        end = float(following["start"])
-        duration = end - start
-        if duration < SPEECH_GAP_MIN_SECONDS:
-            continue
-        speech_overlap = sum(max(0.0, min(end, speech_end) - max(start, speech_start)) for speech_start, speech_end in speech_ranges)
-        if speech_overlap < min(duration * 0.55, SPEECH_GAP_MIN_SECONDS):
-            continue
+    for speech_start, speech_end in speech_ranges:
+        start = max(0.0, float(speech_start))
+        end = min(audio_end, float(speech_end))
         cursor = start
-        while end - cursor > SPEECH_GAP_MAX_SECONDS:
-            gaps.append((cursor, cursor + SPEECH_GAP_MAX_SECONDS))
-            cursor += SPEECH_GAP_MAX_SECONDS - 1.0
+        for covered_start, covered_end in covered:
+            if covered_end <= cursor:
+                continue
+            if covered_start >= end:
+                break
+            if covered_start - cursor >= SPEECH_GAP_MIN_SECONDS:
+                gaps.append((cursor, min(covered_start, end)))
+            cursor = max(cursor, min(covered_end, end))
+            if cursor >= end:
+                break
         if end - cursor >= SPEECH_GAP_MIN_SECONDS:
             gaps.append((cursor, end))
-    return gaps
 
-
+    chunks = []
+    for start, end in gaps:
+        cursor = start
+        while end - cursor > SPEECH_GAP_MAX_SECONDS:
+            chunks.append((cursor, cursor + SPEECH_GAP_MAX_SECONDS))
+            cursor += SPEECH_GAP_MAX_SECONDS - 1.0
+        if end - cursor >= SPEECH_GAP_MIN_SECONDS:
+            chunks.append((cursor, end))
+    return chunks
 def rebuild_raw_transcription_artifacts(raw_segments, raw_words):
     words = []
     for item in sorted(raw_words, key=lambda value: (float(value["start"]), float(value["end"]))):
@@ -1344,6 +1362,8 @@ def discard_unreliable_first_pass_segments(raw_segments, raw_words):
         very_low_word_confidence = (
             mean_probability is not None
             and mean_probability < WHISPER_REJECT_MEAN_WORD_PROB
+            and avg_logprob is not None
+            and avg_logprob < -0.8
         )
         failed_fallback = (
             avg_logprob is not None
@@ -1413,15 +1433,19 @@ def recover_uncovered_speech(model, video_path, raw_segments, raw_words, languag
         from faster_whisper.vad import VadOptions, get_speech_timestamps
 
         audio = decode_audio(video_path, sampling_rate=16000)
-        vad_options = VadOptions(min_silence_duration_ms=400, speech_pad_ms=150)
+        vad_options = VadOptions(onset=0.35, offset=0.30, min_silence_duration_ms=250, speech_pad_ms=200)
         speech_chunks = get_speech_timestamps(audio, vad_options)
         speech_ranges = [(item["start"] / 16000.0, item["end"] / 16000.0) for item in speech_chunks]
-        gaps = find_uncovered_speech_gaps(raw_words, speech_ranges)
+        audio_duration = len(audio) / 16000.0
+        gaps = find_uncovered_speech_gaps(raw_words, speech_ranges, audio_duration)
         debug["candidates"] = [{"start": start, "end": end} for start, end in gaps]
         if not gaps:
             return raw_segments, raw_words, debug
 
-        recovery_hotwords = ", ".join(extract_title_hotwords(video_title)) or None
+        recovery_hotwords = ", ".join(
+            extract_title_hotwords(video_title)
+            + ["one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"]
+        )
         recovered_words = []
         recovered_segments = []
         for gap_index, (gap_start, gap_end) in enumerate(gaps, start=1):
@@ -1434,8 +1458,9 @@ def recover_uncovered_speech(model, video_path, raw_segments, raw_words, languag
                 language=language if language else None,
                 beam_size=5,
                 patience=1.2,
-                vad_filter=True,
-                vad_parameters={"min_silence_duration_ms": 250, "speech_pad_ms": 200},
+                # The candidate already passed whole-audio Silero VAD. Running
+                # VAD again on a one-word clip can erase short counts/commands.
+                vad_filter=False,
                 word_timestamps=True,
                 condition_on_previous_text=False,
                 initial_prompt=None,
@@ -1456,7 +1481,9 @@ def recover_uncovered_speech(model, video_path, raw_segments, raw_words, languag
                 mean_probability = sum(probabilities) / len(probabilities) if probabilities else 0.0
                 if not text or looks_like_prompt_echo(text, video_title):
                     continue
-                if avg_logprob < -0.8 or no_speech_prob > 0.55 or mean_probability < 0.30:
+                token_count = len(re.findall(r"[A-Za-z0-9']+", text))
+                short_utterance = token_count <= 4 and avg_logprob >= -0.6 and no_speech_prob <= 0.75
+                if avg_logprob < -0.8 or no_speech_prob > 0.75 or (mean_probability < 0.30 and not short_utterance):
                     continue
                 segment_words = []
                 for word in local_words:
@@ -1504,13 +1531,112 @@ def recover_uncovered_speech(model, video_path, raw_segments, raw_words, languag
             raw_segments = list(raw_segments) + recovered_segments
             raw_words = list(raw_words) + recovered_words
             raw_segments, raw_words = rebuild_raw_transcription_artifacts(raw_segments, raw_words)
-        remaining = find_uncovered_speech_gaps(raw_words, speech_ranges)
+        remaining = find_uncovered_speech_gaps(raw_words, speech_ranges, audio_duration)
         debug["remaining_candidates"] = [{"start": start, "end": end} for start, end in remaining]
     except Exception as exc:
         debug["error"] = f"{type(exc).__name__}: {exc}"
         print(f"Speech-gap recovery failed; keeping the first-pass transcript: {exc}", flush=True)
     return raw_segments, raw_words, debug
 
+
+COUNT_WORDS = {"one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"}
+
+
+def should_recover_spoken_counts(raw_segments, raw_words, video_title=""):
+    title = normalize_prompt_echo_text(video_title)
+    title_signal = bool(re.search(r"\b(exercise|follow along|tutorial|workout|training|drill)\b", title))
+    transcript = " ".join(str(item.get("text", "")) for item in raw_segments).lower()
+    context_signal = bool(re.search(r"\b(exercise|repeat|repetition|times|countdown|ready)\b", transcript))
+    count_total = sum(normalize_prompt_echo_text(item.get("text")) in COUNT_WORDS for item in raw_words)
+    return count_total >= 8 and context_signal and (title_signal or count_total >= 100)
+
+def recover_missing_spoken_counts(model, video_path, raw_segments, raw_words, language, video_title, progress=None):
+    """Use a context-reset, no-VAD full pass only to restore omitted count words."""
+    debug = {"enabled": False, "accepted": [], "rejected_repetitions": [], "error": ""}
+    if not should_recover_spoken_counts(raw_segments, raw_words, video_title):
+        return raw_segments, raw_words, debug
+    debug["enabled"] = True
+    try:
+        count_hotwords = ", ".join(extract_title_hotwords(video_title) + sorted(COUNT_WORDS))
+        complementary, _info = model.transcribe(
+            video_path,
+            language=language if language else None,
+            beam_size=5,
+            patience=1.2,
+            vad_filter=False,
+            word_timestamps=True,
+            condition_on_previous_text=False,
+            initial_prompt="Preserve short spoken utterances and exercise counts.",
+            hotwords=count_hotwords,
+            temperature=0.0,
+            compression_ratio_threshold=WHISPER_COMPRESSION_RATIO_THRESHOLD,
+            log_prob_threshold=-1.0,
+            no_speech_threshold=0.6,
+        )
+        existing_midpoints = sorted(
+            (float(word["start"]) + float(word["end"])) / 2.0 for word in raw_words
+        )
+        added_words = []
+        added_segments = []
+        for segment in complementary:
+            words = list(getattr(segment, "words", None) or [])
+            normalized = [normalize_prompt_echo_text(word.word) for word in words]
+            count_indexes = [index for index, token in enumerate(normalized) if token in COUNT_WORDS]
+            if not count_indexes:
+                continue
+            longest_count_run = 0
+            current_run = 0
+            for token in normalized:
+                if token in COUNT_WORDS:
+                    current_run += 1
+                    longest_count_run = max(longest_count_run, current_run)
+                else:
+                    current_run = 0
+            if longest_count_run > 12 or (len(words) > 18 and len(count_indexes) / len(words) > 0.70):
+                debug["rejected_repetitions"].append({
+                    "start": float(segment.start), "end": float(segment.end), "text": segment.text.strip()
+                })
+                continue
+            avg_logprob = float(getattr(segment, "avg_logprob", -99.0) or -99.0)
+            no_speech_prob = float(getattr(segment, "no_speech_prob", 1.0) or 1.0)
+            if avg_logprob < -0.65 or no_speech_prob > 0.75:
+                continue
+            segment_added = []
+            for index in count_indexes:
+                word = words[index]
+                probability = float(word.probability) if getattr(word, "probability", None) is not None else 0.0
+                midpoint = (float(word.start) + float(word.end)) / 2.0
+                if probability < 0.35 or any(abs(midpoint - value) <= 0.50 for value in existing_midpoints):
+                    continue
+                item = {
+                    "index": 0, "segment_id": -1, "start": float(word.start), "end": float(word.end),
+                    "text": word.word.strip(), "probability": probability, "recovered": True,
+                    "recovery_source": "full_audio_count_pass",
+                }
+                segment_added.append(item)
+                added_words.append(item)
+                existing_midpoints.append(midpoint)
+            if segment_added:
+                existing_midpoints.sort()
+                added_segments.append({
+                    "id": -1, "start": segment_added[0]["start"], "end": segment_added[-1]["end"],
+                    "text": " ".join(item["text"] for item in segment_added),
+                    "avg_logprob": avg_logprob, "no_speech_prob": no_speech_prob,
+                    "compression_ratio": getattr(segment, "compression_ratio", None), "temperature": 0.0,
+                    "translation": "", "recovered": True, "recovery_source": "full_audio_count_pass",
+                })
+                debug["accepted"].append({
+                    "start": segment_added[0]["start"], "end": segment_added[-1]["end"],
+                    "text": " ".join(item["text"] for item in segment_added),
+                })
+        if added_words:
+            raw_segments, raw_words = rebuild_raw_transcription_artifacts(
+                list(raw_segments) + added_segments, list(raw_words) + added_words
+            )
+    except Exception as exc:
+        debug["error"] = f"{type(exc).__name__}: {exc}"
+        print(f"Full-audio count recovery failed; keeping other transcript passes: {exc}", flush=True)
+    return raw_segments, raw_words, debug
 
 def cache_revision_is_current(audio_hash):
     if not audio_hash:
@@ -1624,6 +1750,11 @@ def transcribe(
         model, video_path, raw_segments, raw_words, language, video_title, progress
     )
     gap_debug["rejected_first_pass_segments"] = rejected_first_pass
+    report(progress, "postprocessing", 87, "Recovering missing spoken counts across the full audio")
+    raw_segments, raw_words, count_debug = recover_missing_spoken_counts(
+        model, video_path, raw_segments, raw_words, language, video_title, progress
+    )
+    gap_debug["full_audio_count_recovery"] = count_debug
     report(progress, "postprocessing", 88, "Aligning words with WhisperX")
     try:
         raw_segments, raw_words, alignment_debug = run_whisperx_alignment(
