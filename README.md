@@ -64,8 +64,22 @@ v2.1.0 是面向愿意从 GitHub 获取项目、并希望长期安全使用电�
 - v2.0.6 APK、电脑端脚本和数据目录完整保留，不会被 v2.1.0 覆盖。
 - 修复“生成字幕中”页面高频刷新时闪烁、滚动到底部后自动跳回顶部的问题：任务列表使用 `RecyclerView + ListAdapter + DiffUtil` 差量更新，进度变化只更新对应任务卡；显示顺序按任务创建时间保持稳定，不再受“最后同步时间”影响，缩略图和滚动位置都会复用。
 - 修复播放位置处于两句字幕之间的无字幕空白区时，“上句”或“下句”错误跳回视频开头的问题：现在以播放器当前时间查找相邻字幕，“上句”进入空白区之前的句子，“下句”进入空白区之后的句子；视频首尾会安全停在第一句或最后一句。
-- 本次回归验证包含 31 项 Android 单元测试和 77 项电脑端单元测试；任务列表测试中，滚动到任务 5～8 后连续刷新仍保持原位；字幕导航测试中，在真实视频约 38 秒的字幕间隙点击“下句”选中后一句 `Starting our camping trip...`，点击“上句”选中前一句 `Oh my my my...`，均未跳到视频开头。
+- Fixed omitted short counts in training videos. Reliable segments such as `Two.` or `Four.` are no longer removed solely because word-timestamp confidence is low. Silero VAD recovery now computes detected speech minus existing word coverage, including media edges.
+- Training tutorials with strong counting context use an additional full-audio, no-VAD, context-reset number pass. Only missing confident English number words are merged; abnormal long repetitions are rejected. WhisperX 3.8.6 CUDA then aligns the merged transcript and rebuilds a monotonic timeline.
+- 本次回归验证包含 31 项 Android 单元测试和 81 项电脑端单元测试；任务列表测试中，滚动到任务 5～8 后连续刷新仍保持原位；字幕导航测试中，在真实视频约 38 秒的字幕间隙点击“下句”选中后一句 `Starting our camping trip...`，点击“上句”选中前一句 `Oh my my my...`，均未跳到视频开头。
 
+#### v2.1.0 full-audio caption coverage validation
+
+Validation used four complete videos and complete audio/transcript timelines, not clips: AIRFLARE (21:55), Kanchenjunga (59:08), Hidden Paradise (27:31), and Switzerland (14:54), totaling about 2 hours 3 minutes. Every audited word timestamp is monotonic and inside the media duration.
+
+| Complete video | Words | Result |
+| --- | ---: | --- |
+| AIRFLARE Tutorial | 2,792 -> 2,860 | Full no-VAD number pass plus whole-audio WhisperX CUDA alignment; count words 146 -> 215, 24 credible groups restored, 5 runaway repetition segments rejected |
+| Kanchenjunga Base Camp | 6,162 | Whole-audio coverage audit passed; uncovered speech uses local second-pass recognition |
+| Pakistan's Hidden Paradise | 2,926 | Whole-audio coverage audit passed; training count pass remains disabled |
+| Switzerland | 1,577 | Whole-audio coverage audit passed; training count pass remains disabled |
+
+The implementation draws on [WhisperX](https://github.com/m-bain/whisperX), [faster-whisper](https://github.com/SYSTRAN/faster-whisper), and [stable-ts](https://github.com/jianfch/stable-ts). All 81 computer-side tests pass. The pipeline revision changed so stale cache cannot masquerade as a new result. For an existing video, choose Generate+ and regenerate recognition and translation.
 安装包位置：`release/app-v2.1.0.apk`
 
 如果用户没有 GitHub 账号，按项目建议继续使用完整保留的 v2.0.6 组合：`release/app-v2.0.6.apk` 与 `tools/versions/v2.0.6/start_service.ps1`。
