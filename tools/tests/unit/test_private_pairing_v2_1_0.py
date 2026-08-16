@@ -66,6 +66,20 @@ class PrivatePairingV210Tests(unittest.TestCase):
         self.assertIn('.setNeutralButton("测试")', self.activity)
         self.assertIn("手动填写", self.activity)
 
+    def test_launcher_restarts_failed_python_service_and_keeps_a_log(self):
+        self.assertIn("function Start-ServiceBackgroundJob", self.launcher)
+        self.assertIn("function Test-LocalServiceHealth", self.launcher)
+        self.assertIn('$serviceJob.State -in @("Failed", "Stopped", "Completed")', self.launcher)
+        self.assertIn("Python service watchdog restart", self.launcher)
+        self.assertIn("$serviceLogFile", self.launcher)
+        self.assertIn("Add-ServiceRuntimeLog", self.launcher)
+        self.assertIn("service.py 2>&1", self.launcher)
+
+
+    def test_launcher_uses_bind_check_and_safe_host_port_fallback(self):
+        self.assertIn("function Test-PortAvailable", self.launcher)
+        self.assertIn("foreach ($candidate in 18766..18785)", self.launcher)
+        self.assertIn("adb reverse maps it to computer port", self.launcher)
 
 if __name__ == "__main__":
     unittest.main()

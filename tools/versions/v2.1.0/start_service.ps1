@@ -166,6 +166,7 @@ $githubApiErrorFile = Join-Path $dataDir "github_service_config_error.log"
 $officialDiscoveryLogin = "qiangge9468-collab"
 $officialDiscoveryGistId = "b3f5221fbc3e95270951695b92aaa84c"
 $runtimeDir = Split-Path -Parent $runtimeConfig
+$serviceLogFile = Join-Path $runtimeDir "service.log"
 if (-not (Test-Path -LiteralPath $runtimeDir)) { New-Item -ItemType Directory -Path $runtimeDir -Force | Out-Null }
 $env:WHISPER_RUNTIME_CONFIG = $runtimeConfig
 $env:WHISPER_RUNTIME_STATUS = $runtimeStatus
@@ -501,6 +502,20 @@ function Add-RecentLog {
     while ($Queue.Count -gt 10) { [void]$Queue.Dequeue() }
 }
 
+function Add-ServiceRuntimeLog {
+    param(
+        [System.Collections.Generic.Queue[string]]$Queue,
+        [string]$Line
+    )
+    if ([string]::IsNullOrWhiteSpace($Line)) { return }
+    Add-RecentLog $Queue $Line
+    try {
+        $timestamp = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+        Add-Content -LiteralPath $serviceLogFile -Value "[$timestamp] $($Line.Trim())" -Encoding UTF8
+    } catch {
+    }
+}
+
 function Read-RuntimeStatus {
     if ([string]::IsNullOrWhiteSpace($runtimeStatus)) { return $null }
     if (-not (Test-Path -LiteralPath $runtimeStatus)) { return $null }
@@ -613,15 +628,16 @@ function Write-ServiceDashboard {
 
 }
 
-function Test-PortBusy([int]$ListenPort) {
-    $client = New-Object System.Net.Sockets.TcpClient
+function Test-PortAvailable([int]$ListenPort) {
+    $listener = $null
     try {
-        $async = $client.BeginConnect("127.0.0.1", $ListenPort, $null, $null)
-        return $async.AsyncWaitHandle.WaitOne(500, $false) -and $client.Connected
+        $listener = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Any, $ListenPort)
+        $listener.Start()
+        return $true
     } catch {
         return $false
     } finally {
-        $client.Close()
+        if ($listener) { $listener.Stop() }
     }
 }
 
@@ -640,10 +656,22 @@ function Get-CloudflaredPath {
     return $null
 }
 
-if (Test-PortBusy $Port) {
-    Write-Host "Port $Port is already in use. Close the old service window or run with another port, for example:"
-    Write-Host "  powershell -ExecutionPolicy Bypass -File tools/versions/v2.1.0/start_service.ps1 -Port 8767"
-    exit 1
+if (-not (Test-PortAvailable $Port)) {
+    $requestedPort = $Port
+    $fallbackPort = $null
+    foreach ($candidate in 18766..18785) {
+        if (Test-PortAvailable $candidate) {
+            $fallbackPort = $candidate
+            break
+        }
+    }
+    if ($null -eq $fallbackPort) {
+        throw "Port $requestedPort is unavailable and no fallback port in 18766-18785 could be opened."
+    }
+    $Port = [int]$fallbackPort
+    $env:WHISPER_PORT = "$Port"
+    Write-Host "Port $requestedPort is bound by another Windows process; using computer port $Port instead." -ForegroundColor Yellow
+    Write-Host "USB phones still use 127.0.0.1:8766; adb reverse maps it to computer port $Port." -ForegroundColor Yellow
 }
 
 $tailscale = if ($NoTailscale) { $null } else { Get-TailscalePath }
@@ -704,7 +732,7 @@ if ($adb) {
     }
 }
 
-$serviceJob = Start-Job -ArgumentList $projectRoot, $Port, $token, $runtimeConfig, $runtimeStatus, $env:PATH, $env:TRANSLATION_PROVIDER, $env:TRANSLATION_MODEL, $env:TRANSLATION_DEVICE, $env:TRANSLATION_SOURCE_LANGUAGE, $env:TRANSLATION_TARGET_LANGUAGE, $env:TRANSLATION_STYLE, $env:WHISPER_DEVICE, $env:WHISPER_COMPUTE_TYPE, $env:WHISPER_ENGLISH_MODEL, $env:WHISPER_HOTWORDS, $env:WHISPER_INITIAL_PROMPT -ScriptBlock {
+$serviceJobScript = {
     param($Root, $ListenPort, $AuthToken, $ConfigPath, $StatusPath, $RuntimePath, $TranslationProvider, $TranslationModel, $TranslationDevice, $TranslationSourceLanguage, $TranslationTargetLanguage, $TranslationStyle, $WhisperDevice, $WhisperComputeType, $WhisperEnglishModel, $WhisperHotwords, $WhisperInitialPrompt)
     Set-Location $Root
     $env:PATH = $RuntimePath
@@ -744,8 +772,35 @@ $serviceJob = Start-Job -ArgumentList $projectRoot, $Port, $token, $runtimeConfi
     if (-not (Test-Path -LiteralPath $servicePythonExe)) {
         throw "Subtitle Python environment was not found: $servicePythonExe"
     }
-    & $servicePythonExe tools\versions\v2.1.0\service.py
+    & $servicePythonExe tools\versions\v2.1.0\service.py 2>&1 | ForEach-Object { [string]$_ }
+    $exitCode = $LASTEXITCODE
+    throw "Python service exited unexpectedly with code $exitCode"
 }
+$serviceJobArguments = @(
+    $projectRoot, $Port, $token, $runtimeConfig, $runtimeStatus, $env:PATH,
+    $env:TRANSLATION_PROVIDER, $env:TRANSLATION_MODEL, $env:TRANSLATION_DEVICE,
+    $env:TRANSLATION_SOURCE_LANGUAGE, $env:TRANSLATION_TARGET_LANGUAGE,
+    $env:TRANSLATION_STYLE, $env:WHISPER_DEVICE, $env:WHISPER_COMPUTE_TYPE,
+    $env:WHISPER_ENGLISH_MODEL, $env:WHISPER_HOTWORDS, $env:WHISPER_INITIAL_PROMPT
+)
+function Start-ServiceBackgroundJob {
+    return Start-Job -ArgumentList $serviceJobArguments -ScriptBlock $serviceJobScript
+}
+
+function Test-LocalServiceHealth {
+    try {
+        $probeUrl = "http://127.0.0.1:$Port/ping"
+        if ($token) {
+            $probeUrl += "?token=$([System.Uri]::EscapeDataString($token))"
+        }
+        $probe = Invoke-WebRequest -UseBasicParsing -Uri $probeUrl -TimeoutSec 2
+        return $probe.StatusCode -eq 200
+    } catch {
+        return $false
+    }
+}
+
+$serviceJob = Start-ServiceBackgroundJob
 
 $publicTunnelEnabled = -not $NoPublicTunnel
 $cloudflared = if ($publicTunnelEnabled) { Get-CloudflaredPath } else { $null }
@@ -753,6 +808,8 @@ $cloudJob = $null
 $recentLogs = New-Object 'System.Collections.Generic.Queue[string]'
 $publicBase = ""
 $printedPublicBase = ""
+$serviceRestartCount = 0
+$nextServiceRestartAt = [datetime]::MinValue
 
 try {
     $dashboardUrl = New-DashboardUrl
@@ -789,7 +846,29 @@ try {
 
     while ($true) {
         foreach ($line in Receive-Job -Job $serviceJob -ErrorAction SilentlyContinue) {
-            Add-RecentLog $recentLogs ([string]$line)
+            Add-ServiceRuntimeLog $recentLogs ([string]$line)
+        }
+        if ($serviceJob.State -in @("Failed", "Stopped", "Completed")) {
+            $now = Get-Date
+            if ($now -ge $nextServiceRestartAt) {
+                $terminalState = [string]$serviceJob.State
+                $reason = ""
+                if ($serviceJob.ChildJobs.Count -gt 0 -and $serviceJob.ChildJobs[0].JobStateInfo.Reason) {
+                    $reason = [string]$serviceJob.ChildJobs[0].JobStateInfo.Reason.Message
+                }
+                $detail = if ($reason) { " ($reason)" } else { "" }
+                Add-ServiceRuntimeLog $recentLogs "Python service stopped: $terminalState$detail"
+                Remove-Job -Job $serviceJob -Force -ErrorAction SilentlyContinue
+                $serviceJob = Start-ServiceBackgroundJob
+                $serviceRestartCount += 1
+                $backoffSeconds = [Math]::Min(30, [Math]::Pow(2, [Math]::Min(4, $serviceRestartCount - 1)))
+                $nextServiceRestartAt = $now.AddSeconds($backoffSeconds)
+                Add-ServiceRuntimeLog $recentLogs "Python service watchdog restart #$serviceRestartCount started."
+            }
+        } elseif ($serviceRestartCount -gt 0 -and (Test-LocalServiceHealth)) {
+            Add-ServiceRuntimeLog $recentLogs "Python service health check passed after restart."
+            $serviceRestartCount = 0
+            $nextServiceRestartAt = [datetime]::MinValue
         }
         if ($adbJob) {
             foreach ($line in Receive-Job -Job $adbJob -ErrorAction SilentlyContinue) {

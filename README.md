@@ -67,7 +67,8 @@ v2.1.0 是面向愿意从 GitHub 获取项目、并希望长期安全使用电�
 - 修复长视频在某一段之后声音与字幕严重错位的问题。主识别不再把上一窗口文本带入下一窗口；即使 Whisper 给出较高置信度，重复 5-gram 循环也会被质量门控删除并交给局部无上下文识别恢复，避免错误文本再被 WhisperX 强制对齐到后续声音。
 - 缺口恢复只在标题和上下文明确属于训练教程时启用计数热词；普通旅行视频不会再被 `one` 到 `ten` 热词诱导出 11～29 等不存在的数字序列。训练视频仍保留完整音频无 VAD 计数补识别，合法的 `One, two, three, four, five` 不会被当成重复幻觉删除。
 - 没有字幕识别或翻译任务时，服务默认保留模型 120 秒用于连续任务热启动，然后调用 CTranslate2 `unload_model()` 卸载 Whisper、释放 NLLB 引用并清理未使用 CUDA 缓存；新任务会自动重新加载，队列中仍有任务时不会卸载。
-- 本次回归验证包含 31 项 Android 单元测试和 88 项电脑端单元测试；任务列表测试中，滚动到任务 5～8 后连续刷新仍保持原位；字幕导航测试中，在真实视频约 38 秒的字幕间隙点击“下句”选中后一句 `Starting our camping trip...`，点击“上句”选中前一句 `Oh my my my...`，均未跳到视频开头。
+- 修复启动脚本仍在运行、但 Python 服务意外退出后手机只收到失效 Cloudflare 地址的问题：v2.1.0 现在持续监控本地 `/ping` 和服务子任务，异常退出后按退避策略自动重启，并把退出原因写入 `tools/runtime/v2.1.0/service.log`。启动时还会用真实端口绑定检查识别 Windows 已占用但未监听的端口；默认 8766 冲突时自动改用 18766～18785，而 USB 手机仍通过 `adb reverse` 使用固定的 127.0.0.1:8766。Cloudflare 与 GitHub 自动发现地址会使用实际电脑端口继续工作。
+- 本次回归验证包含 31 项 Android 单元测试和 90 项电脑端单元测试；任务列表测试中，滚动到任务 5～8 后连续刷新仍保持原位；字幕导航测试中，在真实视频约 38 秒的字幕间隙点击“下句”选中后一句 `Starting our camping trip...`，点击“上句”选中前一句 `Oh my my my...`，均未跳到视频开头。
 
 #### v2.1.0 长音频时间轴与完整音频回归
 
@@ -82,7 +83,7 @@ v2.1.0 是面向愿意从 GitHub 获取项目、并希望长期安全使用电�
 | Pakistan's Hidden Paradise | 27:31 | 0 | 48 | 28 | 0 |
 | Bangladesh | 36:03 | 0 | 72 | 54 | 0 |
 
-实现参考 [WhisperX](https://github.com/m-bain/whisperX)、[faster-whisper](https://github.com/SYSTRAN/faster-whisper) 和 [stable-ts](https://github.com/jianfch/stable-ts) 的成熟思路。88 项电脑端测试全部通过。流水线修订号已经改变，旧缓存不会伪装成修复后的结果；已有视频需要选择“生成+”重新识别和翻译。
+实现参考 [WhisperX](https://github.com/m-bain/whisperX)、[faster-whisper](https://github.com/SYSTRAN/faster-whisper) 和 [stable-ts](https://github.com/jianfch/stable-ts) 的成熟思路。90 项电脑端测试全部通过。流水线修订号已经改变，旧缓存不会伪装成修复后的结果；已有视频需要选择“生成+”重新识别和翻译。
 安装包位置：`release/app-v2.1.0.apk`
 
 如果用户没有 GitHub 账号，按项目建议继续使用完整保留的 v2.0.6 组合：`release/app-v2.0.6.apk` 与 `tools/versions/v2.0.6/start_service.ps1`。
