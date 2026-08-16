@@ -64,22 +64,25 @@ v2.1.0 是面向愿意从 GitHub 获取项目、并希望长期安全使用电�
 - v2.0.6 APK、电脑端脚本和数据目录完整保留，不会被 v2.1.0 覆盖。
 - 修复“生成字幕中”页面高频刷新时闪烁、滚动到底部后自动跳回顶部的问题：任务列表使用 `RecyclerView + ListAdapter + DiffUtil` 差量更新，进度变化只更新对应任务卡；显示顺序按任务创建时间保持稳定，不再受“最后同步时间”影响，缩略图和滚动位置都会复用。
 - 修复播放位置处于两句字幕之间的无字幕空白区时，“上句”或“下句”错误跳回视频开头的问题：现在以播放器当前时间查找相邻字幕，“上句”进入空白区之前的句子，“下句”进入空白区之后的句子；视频首尾会安全停在第一句或最后一句。
-- Fixed omitted short counts in training videos. Reliable segments such as `Two.` or `Four.` are no longer removed solely because word-timestamp confidence is low. Silero VAD recovery now computes detected speech minus existing word coverage, including media edges.
-- Training tutorials with strong counting context use an additional full-audio, no-VAD, context-reset number pass. Only missing confident English number words are merged; abnormal long repetitions are rejected. WhisperX 3.8.6 CUDA then aligns the merged transcript and rebuilds a monotonic timeline.
-- 本次回归验证包含 31 项 Android 单元测试和 81 项电脑端单元测试；任务列表测试中，滚动到任务 5～8 后连续刷新仍保持原位；字幕导航测试中，在真实视频约 38 秒的字幕间隙点击“下句”选中后一句 `Starting our camping trip...`，点击“上句”选中前一句 `Oh my my my...`，均未跳到视频开头。
+- 修复长视频在某一段之后声音与字幕严重错位的问题。主识别不再把上一窗口文本带入下一窗口；即使 Whisper 给出较高置信度，重复 5-gram 循环也会被质量门控删除并交给局部无上下文识别恢复，避免错误文本再被 WhisperX 强制对齐到后续声音。
+- 缺口恢复只在标题和上下文明确属于训练教程时启用计数热词；普通旅行视频不会再被 `one` 到 `ten` 热词诱导出 11～29 等不存在的数字序列。训练视频仍保留完整音频无 VAD 计数补识别，合法的 `One, two, three, four, five` 不会被当成重复幻觉删除。
+- 没有字幕识别或翻译任务时，服务默认保留模型 120 秒用于连续任务热启动，然后调用 CTranslate2 `unload_model()` 卸载 Whisper、释放 NLLB 引用并清理未使用 CUDA 缓存；新任务会自动重新加载，队列中仍有任务时不会卸载。
+- 本次回归验证包含 31 项 Android 单元测试和 88 项电脑端单元测试；任务列表测试中，滚动到任务 5～8 后连续刷新仍保持原位；字幕导航测试中，在真实视频约 38 秒的字幕间隙点击“下句”选中后一句 `Starting our camping trip...`，点击“上句”选中前一句 `Oh my my my...`，均未跳到视频开头。
 
-#### v2.1.0 full-audio caption coverage validation
+#### v2.1.0 长音频时间轴与完整音频回归
 
-Validation used four complete videos and complete audio/transcript timelines, not clips: AIRFLARE (21:55), Kanchenjunga (59:08), Hidden Paradise (27:31), and Switzerland (14:54), totaling about 2 hours 3 minutes. Every audited word timestamp is monotonic and inside the media duration.
+`Crossing Africa Coast to Coast Ep1` 在 06:25 截图中的 `$4,000, $5,000, $6,000` 本身时间基本正确；真正的错误是同一个约 370～400 秒 Whisper 源片段随后高温回退为重复的 `and we're going to do it`，以及约 38 分钟附近重复的 `we're going to go to Cedis`。旧门控只看平均概率，没有识别这种高置信度循环；WhisperX 随后忠实地把错误文本对齐到真实声音，造成看起来像“整体时间轴漂移”。
 
-| Complete video | Words | Result |
-| --- | ---: | --- |
-| AIRFLARE Tutorial | 2,792 -> 2,860 | Full no-VAD number pass plus whole-audio WhisperX CUDA alignment; count words 146 -> 215, 24 credible groups restored, 5 runaway repetition segments rejected |
-| Kanchenjunga Base Camp | 6,162 | Whole-audio coverage audit passed; uncovered speech uses local second-pass recognition |
-| Pakistan's Hidden Paradise | 2,926 | Whole-audio coverage audit passed; training count pass remains disabled |
-| Switzerland | 1,577 | Whole-audio coverage audit passed; training count pass remains disabled |
+回归不是抽取片段，而是把四个完整缓存音频从头到尾运行 Silero VAD、旧字幕质量审计、缺口识别和新质量门控，总计 3 小时 14 分 03 秒。表中的“剩余 VAD 候选”包含音乐、环境声、过短或低置信度声音，程序不会为了追求数字为零而强行生成字幕。
 
-The implementation draws on [WhisperX](https://github.com/m-bain/whisperX), [faster-whisper](https://github.com/SYSTRAN/faster-whisper), and [stable-ts](https://github.com/jianfch/stable-ts). All 81 computer-side tests pass. The pipeline revision changed so stale cache cannot masquerade as a new result. For an existing video, choose Generate+ and regenerate recognition and translation.
+| 完整音频 | 时长 | 旧缓存被拒绝 | 成功恢复 | 剩余 VAD 候选 | 新质量问题 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Crossing Africa Coast to Coast Ep1 | 71:43 | 6（2 个文本循环、4 个伪数字序列） | 101 | 87 | 0 |
+| Crossing Africa Coast to Coast Ep2 | 58:45 | 2（伪数字序列） | 45 | 83 | 0 |
+| Pakistan's Hidden Paradise | 27:31 | 0 | 48 | 28 | 0 |
+| Bangladesh | 36:03 | 0 | 72 | 54 | 0 |
+
+实现参考 [WhisperX](https://github.com/m-bain/whisperX)、[faster-whisper](https://github.com/SYSTRAN/faster-whisper) 和 [stable-ts](https://github.com/jianfch/stable-ts) 的成熟思路。88 项电脑端测试全部通过。流水线修订号已经改变，旧缓存不会伪装成修复后的结果；已有视频需要选择“生成+”重新识别和翻译。
 安装包位置：`release/app-v2.1.0.apk`
 
 如果用户没有 GitHub 账号，按项目建议继续使用完整保留的 v2.0.6 组合：`release/app-v2.0.6.apk` 与 `tools/versions/v2.0.6/start_service.ps1`。
@@ -525,6 +528,15 @@ python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda
 python -c "import ctranslate2; print(ctranslate2.get_cuda_device_count())"
 powershell -ExecutionPolicy Bypass -File tools/tests/integration/test_gpu_models.ps1
 ```
+
+v2.1.0 默认在最后一个任务完成后保留模型 120 秒，然后自动释放空闲模型内存。可以在启动服务前调整热启动时长，例如改成 5 分钟：
+
+```powershell
+$env:MODEL_IDLE_TIMEOUT_SECONDS = "300"
+powershell -ExecutionPolicy Bypass -File tools/versions/v2.1.0/start_service.ps1
+```
+
+卸载只发生在队列为空时；新任务会自动重新装载模型。GTX 1660 SUPER 实测加载 Whisper 后整卡显存为 3655 MiB，强制执行同一空闲卸载路径后降到 1767 MiB，释放约 1888 MiB。数值会随显卡和其他进程变化。
 
 如果提示缺少 CUDA 相关 DLL，例如 `cublas64_12.dll`，需要安装匹配的 CUDA / cuDNN 运行环境，或者安装带 CUDA 支持的 Python 依赖。
 

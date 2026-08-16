@@ -69,7 +69,7 @@ class CaptionCoverageV210Tests(unittest.TestCase):
         pipeline = source[source.index("def transcribe("):]
         self.assertLess(pipeline.index("recover_missing_spoken_counts("), pipeline.index("run_whisperx_alignment("))
         self.assertLess(pipeline.index("run_whisperx_alignment("), pipeline.index("run_semantic_worker(raw_words)"))
-        self.assertIn("speech-coverage-3", self.service.PIPELINE_REVISION)
+        self.assertIn("timeline-quality-4", self.service.PIPELINE_REVISION)
 
 
 if __name__ == "__main__":
