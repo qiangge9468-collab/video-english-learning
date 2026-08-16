@@ -1,4 +1,6 @@
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import collections
+import gc
 import json
 import os
 import queue
@@ -93,7 +95,7 @@ MIN_GAP_SECONDS = 0.03
 TRANSLATION_BATCH_SIZE = int(os.environ.get("TRANSLATION_BATCH_SIZE", "16"))
 MAX_UPLOAD_MB = int(os.environ.get("WHISPER_MAX_UPLOAD_MB", "2048"))
 AUTH_TOKEN = os.environ.get("WHISPER_AUTH_TOKEN", "").strip()
-PIPELINE_REVISION = "v2.1.0-whisperx-speech-coverage-3"
+PIPELINE_REVISION = "v2.1.0-whisperx-timeline-quality-4"
 SPEECH_GAP_MIN_SECONDS = float(os.environ.get("WHISPER_SPEECH_GAP_MIN_SECONDS", "0.75"))
 SPEECH_GAP_MAX_SECONDS = float(os.environ.get("WHISPER_SPEECH_GAP_MAX_SECONDS", "18.0"))
 SPEECH_GAP_PAD_SECONDS = float(os.environ.get("WHISPER_SPEECH_GAP_PAD_SECONDS", "0.75"))
@@ -101,6 +103,7 @@ SPEECH_GAP_MIN_OVERLAP_SECONDS = float(os.environ.get("WHISPER_SPEECH_GAP_MIN_OV
 WHISPER_COMPRESSION_RATIO_THRESHOLD = float(os.environ.get("WHISPER_COMPRESSION_RATIO_THRESHOLD", "2.4"))
 WHISPER_REJECT_LOG_PROB = float(os.environ.get("WHISPER_REJECT_LOG_PROB", "-1.2"))
 WHISPER_REJECT_MEAN_WORD_PROB = float(os.environ.get("WHISPER_REJECT_MEAN_WORD_PROB", "0.20"))
+MODEL_IDLE_TIMEOUT_SECONDS = float(os.environ.get("MODEL_IDLE_TIMEOUT_SECONDS", "120"))
 WHISPERX_REQUIRED = os.environ.get("WHISPERX_REQUIRED", "1").strip().lower() not in ("0", "false", "no", "off")
 WHISPERX_DEVICE = os.environ.get("WHISPERX_DEVICE", "cuda").strip().lower()
 WHISPERX_MODEL_DIR = os.environ.get(
@@ -166,6 +169,7 @@ _model_lock = threading.Lock()
 _models = {}
 _semantic_model_lock = threading.Lock()
 _semantic_models = None
+_models_last_used_at = 0.0
 _jobs_lock = threading.Lock()
 _jobs = {}
 _job_execution_lock = threading.Lock()
@@ -889,8 +893,13 @@ def start_job_thread(job_id):
 
 
 def job_queue_worker():
+    global _models_last_used_at
     while True:
-        job_id = _job_queue.get()
+        try:
+            job_id = _job_queue.get(timeout=max(1.0, min(30.0, MODEL_IDLE_TIMEOUT_SECONDS or 1.0)))
+        except queue.Empty:
+            release_idle_models()
+            continue
         try:
             refresh_queue_positions(job_id)
             run_job(job_id)
@@ -898,6 +907,7 @@ def job_queue_worker():
             with _job_queue_lock:
                 _queued_job_ids.discard(job_id)
             _job_queue.task_done()
+            _models_last_used_at = time.monotonic()
             refresh_queue_positions()
 
 
@@ -1336,6 +1346,51 @@ def rebuild_raw_transcription_artifacts(raw_segments, raw_words):
     return segments, words
 
 
+def normalized_alignment_tokens(text):
+    return re.findall(r"[a-z]+(?:'[a-z]+)?|\d+", str(text or "").lower())
+
+
+def pathological_repeated_phrase(text, ngram_size=5):
+    """Return the dominant repeated phrase when Whisper is stuck in a loop."""
+    tokens = normalized_alignment_tokens(text)
+    if len(tokens) < ngram_size * 3:
+        return None
+    counts = collections.Counter(
+        tuple(tokens[index:index + ngram_size])
+        for index in range(len(tokens) - ngram_size + 1)
+    )
+    phrase, occurrences = counts.most_common(1)[0]
+    count_vocabulary = {
+        "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+        "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen",
+        "eighteen", "nineteen", "twenty",
+    }
+    if occurrences < 3 or all(token in count_vocabulary or token.isdigit() for token in phrase):
+        return None
+    density = occurrences * ngram_size / len(tokens)
+    return {"phrase": " ".join(phrase), "occurrences": occurrences, "density": density}
+
+
+def implausible_count_sequence(text, minimum_run=13):
+    """Detect long numeric hallucinations that cannot fit a short recovery clip."""
+    tokens = normalized_alignment_tokens(text)
+    number_words = {
+        "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+        "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen",
+        "eighteen", "nineteen", "twenty", "thirty", "forty", "fifty", "sixty", "seventy",
+        "eighty", "ninety", "hundred",
+    }
+    longest = current = numeric = 0
+    for token in tokens:
+        if token.isdigit() or token in number_words:
+            current += 1
+            numeric += 1
+            longest = max(longest, current)
+        else:
+            current = 0
+    return longest >= minimum_run and numeric / max(1, len(tokens)) >= 0.70
+
+
 def discard_unreliable_first_pass_segments(raw_segments, raw_words):
     """Drop failed high-temperature Whisper fallbacks before VAD recovery.
 
@@ -1370,7 +1425,18 @@ def discard_unreliable_first_pass_segments(raw_segments, raw_words):
             and avg_logprob < WHISPER_REJECT_LOG_PROB
             and (mean_probability is None or mean_probability < 0.35)
         )
-        if very_low_word_confidence or failed_fallback:
+        repeated = pathological_repeated_phrase(segment.get("text", ""))
+        compression = float(segment.get("compression_ratio") or 0.0)
+        temperature = float(segment.get("temperature") or 0.0)
+        repetition_loop = bool(
+            repeated
+            and (
+                temperature >= 0.6
+                or compression >= 2.2
+                or float(repeated["density"]) >= 0.18
+            )
+        )
+        if very_low_word_confidence or failed_fallback or repetition_loop:
             rejected_ids.add(segment_id)
             rejected.append({
                 "id": segment_id,
@@ -1379,8 +1445,13 @@ def discard_unreliable_first_pass_segments(raw_segments, raw_words):
                 "text": segment.get("text", ""),
                 "avg_logprob": avg_logprob,
                 "mean_word_probability": mean_probability,
-                "temperature": segment.get("temperature"),
-                "reason": "failed Whisper fallback quality gate",
+                "temperature": temperature,
+                "compression_ratio": compression,
+                "repeated_phrase": repeated,
+                "reason": (
+                    "pathological repeated phrase loop"
+                    if repetition_loop else "failed Whisper fallback quality gate"
+                ),
             })
 
     if not rejected_ids:
@@ -1425,7 +1496,7 @@ def segmentation_quality_penalty(segments):
 
 
 def recover_uncovered_speech(model, video_path, raw_segments, raw_words, language, video_title, progress=None):
-    debug = {"candidates": [], "recovered": [], "error": ""}
+    debug = {"candidates": [], "recovered": [], "rejected_hallucinations": [], "error": ""}
     if len(raw_words) < 2:
         return raw_segments, raw_words, debug
     try:
@@ -1442,10 +1513,11 @@ def recover_uncovered_speech(model, video_path, raw_segments, raw_words, languag
         if not gaps:
             return raw_segments, raw_words, debug
 
-        recovery_hotwords = ", ".join(
-            extract_title_hotwords(video_title)
-            + ["one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"]
-        )
+        count_context = should_recover_spoken_counts(raw_segments, raw_words, video_title)
+        recovery_terms = extract_title_hotwords(video_title)
+        if count_context:
+            recovery_terms += ["one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"]
+        recovery_hotwords = ", ".join(recovery_terms) or None
         recovered_words = []
         recovered_segments = []
         for gap_index, (gap_start, gap_end) in enumerate(gaps, start=1):
@@ -1472,6 +1544,19 @@ def recover_uncovered_speech(model, video_path, raw_segments, raw_words, languag
             )
             for local_segment in local_segments:
                 text = " ".join(local_segment.text.strip().split())
+                repeated_recovery = pathological_repeated_phrase(text)
+                bad_count_recovery = not count_context and implausible_count_sequence(text)
+                if repeated_recovery or bad_count_recovery:
+                    debug["rejected_hallucinations"].append({
+                        "start": clip_start + float(local_segment.start),
+                        "end": clip_start + float(local_segment.end),
+                        "text": text,
+                        "reason": (
+                            "pathological repeated phrase loop"
+                            if repeated_recovery else "implausible count sequence outside exercise context"
+                        ),
+                    })
+                    continue
                 avg_logprob_value = getattr(local_segment, "avg_logprob", None)
                 no_speech_value = getattr(local_segment, "no_speech_prob", None)
                 avg_logprob = float(avg_logprob_value) if avg_logprob_value is not None else -99.0
@@ -1689,7 +1774,7 @@ def transcribe(
             "speech_pad_ms": 150,
         },
         word_timestamps=True,
-        condition_on_previous_text=True,
+        condition_on_previous_text=False,
         prompt_reset_on_temperature=0.5,
         initial_prompt=initial_prompt,
         hotwords=hotwords,
@@ -2003,11 +2088,17 @@ def resolve_whisper_compute_type(requested_compute_type, device, model_name):
 
 
 def get_whisper_model(model_name=None):
+    global _models_last_used_at
     with _model_lock:
         if model_name is None:
             model_name = os.environ.get("WHISPER_MODEL", default_whisper_model())
         if model_name in _models:
-            return _models[model_name]
+            model = _models[model_name]
+            backend = getattr(model, "model", None)
+            if backend is not None and getattr(backend, "model_is_loaded", True) is False:
+                backend.load_model()
+            _models_last_used_at = time.monotonic()
+            return model
 
         try:
             from faster_whisper import WhisperModel
@@ -2043,6 +2134,7 @@ def get_whisper_model(model_name=None):
                     message=f"Loaded Whisper model {display_model_name(model_name)} on {device}/{compute_type}",
                 )
                 _models[model_name] = model
+                _models_last_used_at = time.monotonic()
                 return model
             fallback_model = os.environ.get("WHISPER_FALLBACK_MODEL", "tiny.en")
             if fallback_model == model_name:
@@ -2068,6 +2160,7 @@ def get_whisper_model(model_name=None):
             message=f"Loaded Whisper model {display_model_name(model_name)} on {device}/{compute_type}",
         )
         _models[model_name] = model
+        _models_last_used_at = time.monotonic()
         return model
 
 
@@ -2460,12 +2553,51 @@ def normalize_subtitle_chinese(text):
 
 
 def get_translator():
-    global _translator
+    global _translator, _models_last_used_at
     with _translator_lock:
         if _translator is not None:
+            _models_last_used_at = time.monotonic()
             return _translator
         _translator = build_translator()
+        _models_last_used_at = time.monotonic()
         return _translator
+
+
+def release_idle_models(force=False, now=None):
+    """Unload resident ASR/translation weights after a configurable warm period."""
+    global _translator, _models_last_used_at
+    current = time.monotonic() if now is None else float(now)
+    if not force:
+        if not _job_queue.empty() or not _models_last_used_at:
+            return False
+        if current - _models_last_used_at < MODEL_IDLE_TIMEOUT_SECONDS:
+            return False
+
+    released = False
+    with _model_lock:
+        for model in _models.values():
+            backend = getattr(model, "model", None)
+            unload = getattr(backend, "unload_model", None)
+            if callable(unload) and getattr(backend, "model_is_loaded", True):
+                unload()
+                released = True
+    with _translator_lock:
+        if _translator is not None:
+            _translator = None
+            released = True
+    if released:
+        gc.collect()
+        torch_module = sys.modules.get("torch")
+        cuda = getattr(torch_module, "cuda", None) if torch_module is not None else None
+        empty_cache = getattr(cuda, "empty_cache", None)
+        if callable(empty_cache):
+            empty_cache()
+        write_runtime_status(
+            models_resident=False,
+            message=f"Idle for {int(max(0.0, current - _models_last_used_at))}s; model memory released",
+        )
+        print("Idle model timeout reached; released Whisper and translation model memory.", flush=True)
+    return released
 
 
 def build_translator():
