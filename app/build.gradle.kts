@@ -20,8 +20,9 @@ android {
         applicationId = "com.codex.videolearnenglish.remote"
         minSdk = 26
         targetSdk = 35
-        versionCode = 27
-        versionName = "2.1.0"
+        versionCode = 28
+        versionName = "2.2.0"
+        testInstrumentationRunner = "com.codex.videolearnenglish.FullscreenInstrumentation"
 
         if (enableWhisperNative) {
             ndk {
@@ -61,4 +62,15 @@ dependencies {
     implementation("com.google.android.material:material:1.12.0")
     implementation("com.google.mlkit:translate:17.0.3")
     testImplementation("junit:junit:4.13.2")
+}
+
+// Instrumentation runs inside the production app: use its resolved transitive versions.
+configurations.matching { it.name.contains("AndroidTest") }.configureEach {
+    resolutionStrategy.force(
+        "androidx.viewpager2:viewpager2:1.1.0-beta02",
+        "androidx.collection:collection:1.4.2",
+        "androidx.arch.core:core-runtime:2.2.0",
+        "org.jetbrains.kotlin:kotlin-stdlib-jdk8:1.8.22",
+        "org.jetbrains.kotlin:kotlin-stdlib-jdk7:1.8.22"
+    )
 }

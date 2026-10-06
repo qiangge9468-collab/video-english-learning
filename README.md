@@ -1,5 +1,7 @@
 # 看视频学英语
 
+当前手机端推荐版本：**[v2.2.0 · 全屏字幕学习](release/app-v2.2.0.apk)**。电脑端继续使用 `tools/versions/v2.1.0/start_service.ps1`，无需迁移服务数据。旧版 APK 全部保留。
+
 “看视频学英语”是一个 Android 英语视频学习 App。它的核心目标很简单：让你用自己真正感兴趣的英文视频逐句学英语。
 
 很多英文视频没有现成字幕，或者只有英文字幕、没有中文字幕。这个软件可以把手机里的本地视频交给电脑端 Whisper 服务处理，自动生成英文字幕，再翻译成中文，并把字幕保存到手机本地。以后再打开同一个视频，可以直接继续学习，不需要重复生成。
@@ -52,9 +54,24 @@ v2.1.0 在保留 v2.0.6 WhisperX CUDA 字幕流水线和旧 APK 的基础上，�
 
 ## 版本说明
 
+### v2.2.0：全屏字幕学习
+
+- 点击视频右下角的全屏按钮进入；横向视频横屏显示，竖向视频竖屏显示。保持原始比例，不拉伸或裁掉画面；左上角返回或系统返回只退出全屏。
+- 全屏只显示学习页的**同一句当前字幕**，不显示字幕列表。中文沿用学习页“翻译开 / 关”；无当前句时隐藏字幕，不残留上一句。
+- 单击视频空白处显示 / 隐藏返回、标题和播放控制栏；双击播放 / 暂停。播放中约 3 秒无操作自动隐藏控制栏，字幕继续显示；字幕设置展开时不会自动收起。
+- 拖动字幕即可调整位置；点“字幕”打开 `A−`、`A+`、锁定位置和复位。字号范围为 14–40 sp，极长句会按可用高度临时适配，避免被裁掉。位置、字号和锁定状态会保存。
+- **锁定的是字幕位置和大小，不是查词功能**。锁定后仍可点击英文单词 / 搭配查询，并沿用词典、发音和单词本。拖动手势不会误触查词；查词时暂停视频，关闭后只在原先播放且应用仍在前台时恢复。
+- 使用系统栏 / 刘海安全区限制字幕和控件位置。全屏隐藏系统栏，可从屏幕边缘临时呼出；字幕不会拖进返回、标题或底部播放栏。
+- 全屏前后复用同一个 `MediaPlayer` 和 `TextureView`，不重新加载媒体、不主动跳转时间轴；保留播放 / 暂停、当前句、循环和字幕偏移。进入后台会暂停全屏视频，回到前台不会擅自开始播放。
+- 保留 v2.1.0、v2.0.6 和更早安装包；包名不变，使用原调试签名覆盖安装可保留现有数据。开源演示 APK 仍为 debug 签名，不冒充商店正式签名包。
+
+设计借鉴 B 站视频组件的全屏方向、双击播放及控制栏逻辑，但按英语学习需求简化为当前句字幕，不复制其完整 UI。参考：[B 站官方视频组件](https://miniapp.bilibili.com/small-app-doc/component/video/)、[Android 沉浸模式](https://developer.android.com/develop/ui/views/layout/immersive)、[显示刘海安全区](https://developer.android.com/develop/ui/views/layout/display-cutout)。
+
+模拟器验证方法和结果见 [v2.2.0 全屏验证记录](docs/fullscreen-v2.2.0-validation.md)。验证使用本地真实视频播放以及明确标注的界面测试字幕，不将界面回归结果当作语音识别准确率证明。
+
 ### v2.1.0
 
-v2.1.0 是面向愿意从 GitHub 获取项目、并希望长期安全使用电脑服务的推荐版本。它完整保留 v2.0.6 的 WhisperX 3.8.6 CUDA 对齐、识别质量门控、SaT 断句、词典和视频位置恢复能力，同时加入以下功能：
+v2.1.0 是面向愿意从 GitHub 获取项目、并希望长期安全使用电脑服务的保留版本。它完整保留 v2.0.6 的 WhisperX 3.8.6 CUDA 对齐、识别质量门控、SaT 断句、词典和视频位置恢复能力，同时加入以下功能：
 
 - “我的”页面在“单词本”下方新增“今日复习”，提供释义回忆、原句填空、中译英和听音拼写，以及忘记/困难/记住/简单四档间隔复习。
 - 首次使用时，安装 v2.1.0 APK，把手机通过 USB 连接电脑并允许 USB 调试，然后启动电脑服务；脚本会建立 `adb reverse`，并把带 token 的 USB、局域网、Tailscale 私网、公网候选地址及个人 GitHub 配置地址直接写入手机。
@@ -281,7 +298,8 @@ v1.0.0 是早期版本，功能集中在单个学习页面里。
 | `release/app-v2.0.4.apk` | `tools/versions/v2.0.4/start_service.ps1` | `tools/versions/v2.0.4/service.py` | 增加运行中新增视频优先上传、连续后台锁、0.05 秒时间微调，以及服务重启后的地址/token 自动刷新 |
 | `release/app-v2.0.5.apk` | `tools/versions/v2.0.5/start_service.ps1` | `tools/versions/v2.0.5/service.py` | 保留版本；完整保留 v2.0.4 能力，并新增自动打开的本地网页仪表盘 |
 | `release/app-v2.0.6.apk` | `tools/versions/v2.0.6/start_service.ps1` | `tools/versions/v2.0.6/service.py` | 完整保留；没有 GitHub 账号时建议使用此组合 |
-| `release/app-v2.1.0.apk` | `tools/versions/v2.1.0/start_service.ps1` | `tools/versions/v2.1.0/service.py` | 当前推荐；增加今日复习、USB 自动配对、持久 token、Tailscale 私网，以及 GitHub 无 USB 自动发现最新公网地址 |
+| `release/app-v2.1.0.apk` | `tools/versions/v2.1.0/start_service.ps1` | `tools/versions/v2.1.0/service.py` | 保留版本；今日复习、USB 自动配对、持久 token、Tailscale 私网，以及 GitHub 无 USB 自动发现最新公网地址 |
+| `release/app-v2.2.0.apk` | `tools/versions/v2.1.0/start_service.ps1` | `tools/versions/v2.1.0/service.py` | 当前推荐；新增全屏当前句字幕、拖动 / 字号 / 锁定和沉浸播放，继续兼容 v2.1.0 电脑服务 |
 
 升级电脑端版本时，请先等待旧电脑端队列结束并按 `Ctrl + C` 关闭旧服务，再安装对应 APK，最后运行同版本启动脚本。旧 APK、启动脚本和服务源码都可以继续保留，但两个服务不能同时占用默认的 8766 端口。
 

@@ -7,6 +7,7 @@ import android.content.BroadcastReceiver
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.content.pm.ActivityInfo
 import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -46,6 +47,9 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.recyclerview.widget.DiffUtil
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.ListAdapter
@@ -94,6 +98,12 @@ class LearningActivity : Activity() {
     private val handler = Handler(Looper.getMainLooper())
     private val subtitles = mutableListOf<SubtitleLine>()
     private var mediaPlayer: MediaPlayer? = null
+    private var fullscreenPlayer: FullscreenPlayerLayout? = null
+    private var configureLearningOrientation: (() -> Unit)? = null
+    private var orientationBeforeFullscreen = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+    private var fullscreenButton: TextView? = null
+    private var lookupDialogOpen = false
+    private var activityResumed = false
     private var videoSurface: Surface? = null
     private var currentVideoUri: Uri? = null
     private var selectedIndex = -1
@@ -256,6 +266,9 @@ class LearningActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (Build.VERSION.SDK_INT >= 33) {
+            onBackInvokedDispatcher.registerOnBackInvokedCallback(android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT) { onBackPressed() }
+        }
         dictionary = Dictionary(this)
         onDeviceWhisper = OnDeviceWhisperTranscriber(this)
         initTextToSpeech()
@@ -267,13 +280,16 @@ class LearningActivity : Activity() {
     }
 
     override fun onPause() {
+        activityResumed = false
         saveLearningState()
+        if (fullscreenPlayer?.fullscreen == true) mediaPlayer?.let { if (it.isPlaying) it.pause() }
         clearKeepScreenOn()
         super.onPause()
     }
 
     override fun onResume() {
         super.onResume()
+        activityResumed = true
         if (!CaptionGenerationService.isActive()) {
             CaptionTaskStore.recoverable(this)?.let { task ->
                 startCaptionTaskService(task)
@@ -312,6 +328,13 @@ class LearningActivity : Activity() {
 
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
+        // Fullscreen changes layout only. Never release/seek/reprepare the playing video.
+        if (currentTab == MainTab.LEARNING && !showingWordbook && fullscreenPlayer?.isAttachedToWindow == true) {
+            configureLearningOrientation?.invoke()
+            fullscreenPlayer?.requestLayout()
+            applyFullscreenSystemBars()
+            return
+        }
         val uri = currentVideoUri
         val position = mediaPlayer?.currentPosition ?: pendingResumePositionMs
         pendingResumePositionMs = position.coerceAtLeast(0)
@@ -366,17 +389,21 @@ class LearningActivity : Activity() {
     }
 
     override fun onBackPressed() {
-        if (currentTab != MainTab.LEARNING) {
+        if (fullscreenPlayer?.fullscreen == true) {
+            setFullscreen(false)
+        } else if (currentTab != MainTab.LEARNING) {
             currentTab = MainTab.LEARNING
             buildUi()
         } else if (showingWordbook) {
             buildUi()
         } else {
-            super.onBackPressed()
+            finish()
         }
     }
 
     private fun buildUi() {
+        fullscreenPlayer = null
+        configureLearningOrientation = null
         if (currentTab != MainTab.LEARNING) {
             buildTabPage(currentTab)
             return
@@ -443,10 +470,21 @@ class LearningActivity : Activity() {
         videoFrame.setOnClickListener(videoTapListener)
         textureView.setOnClickListener(videoTapListener)
         videoPreviewImage.setOnClickListener(videoTapListener)
+        val videoSlot = View(this)
+        fullscreenButton = TextView(this).apply {
+            text = "⛶"
+            contentDescription = "全屏播放"
+            textSize = 24f
+            gravity = Gravity.CENTER
+            setTextColor(android.graphics.Color.WHITE)
+            setBackgroundColor(0x66000000)
+            setOnClickListener { setFullscreen(true) }
+        }
+        videoFrame.addView(fullscreenButton, FrameLayout.LayoutParams(dp(48), dp(48), Gravity.BOTTOM or Gravity.END))
         if (landscape) {
-            videoPane.addView(videoFrame, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+            videoPane.addView(videoSlot, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
         } else {
-            videoPane.addView(videoFrame, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, portraitVideoHeightPx()))
+            videoPane.addView(videoSlot, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, portraitVideoHeightPx()))
         }
 
         statusText = TextView(this).apply {
@@ -593,7 +631,33 @@ class LearningActivity : Activity() {
             root.addView(subtitlePane, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
         }
 
-        setContentView(withBottomNav(root))
+        configureLearningOrientation = {
+            val horizontal = resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+            root.orientation = if (horizontal) LinearLayout.HORIZONTAL else LinearLayout.VERTICAL
+            videoPane.layoutParams = if (horizontal) LinearLayout.LayoutParams(0, -1, 1.25f) else LinearLayout.LayoutParams(-1, -2)
+            subtitlePane.layoutParams = if (horizontal) LinearLayout.LayoutParams(0, -1, 1f) else LinearLayout.LayoutParams(-1, 0, 1f)
+            videoSlot.layoutParams = if (horizontal) LinearLayout.LayoutParams(-1, 0, 1f) else LinearLayout.LayoutParams(-1, portraitVideoHeightPx())
+            videoPane.setPadding(18, 18 + statusBarHeightPx(), 18, if (horizontal) 30 else 12)
+            subtitlePane.setPadding(12, if (horizontal) 8 + statusBarHeightPx() else 8, 18, 18)
+            val target = if (horizontal) subtitlePane else videoPane
+            if (controlsPane.parent !== target) {
+                (controlsPane.parent as? ViewGroup)?.removeView(controlsPane)
+                target.addView(controlsPane, if (horizontal) 0 else target.childCount)
+            }
+        }
+        fullscreenPlayer = FullscreenPlayerLayout(this, withBottomNav(root), videoFrame, videoSlot,
+            exit = { setFullscreen(false) },
+            togglePlayback = { toggleFullscreenPlayback() },
+            seek = { targetMs ->
+                val playing = mediaPlayer?.isPlaying == true
+                normalPlayback = true
+                selectedIndex = currentSubtitleIndex(targetMs)
+                seekTo(targetMs, playing)
+                renderSubtitles()
+                scrollToSelected()
+            }
+        )
+        setContentView(fullscreenPlayer)
         updateButtons()
         updateTransientNavigation()
         renderSubtitles()
@@ -602,6 +666,52 @@ class LearningActivity : Activity() {
             restoreLastSessionOrOpenTest()
         }
         showingWordbook = false
+    }
+
+    private fun setFullscreen(enabled: Boolean) {
+        val layout = fullscreenPlayer ?: return
+        if (layout.fullscreen == enabled || (enabled && mediaPlayer == null)) return
+        if (enabled) orientationBeforeFullscreen = requestedOrientation
+        layout.setFullscreen(enabled, currentVideoUri?.let { displayName(it) }.orEmpty())
+        fullscreenButton?.visibility = if (enabled) View.GONE else View.VISIBLE
+        applyFullscreenSystemBars()
+        requestedOrientation = if (enabled) {
+            val player = mediaPlayer
+            if (player != null && player.videoHeight > player.videoWidth) ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
+            else ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        } else orientationBeforeFullscreen
+        updateCurrentCaption()
+        saveLearningState()
+    }
+
+    private fun applyFullscreenSystemBars() {
+        val fullscreen = fullscreenPlayer?.fullscreen == true
+        WindowCompat.setDecorFitsSystemWindows(window, !fullscreen)
+        WindowCompat.getInsetsController(window, window.decorView).apply {
+            systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            isAppearanceLightStatusBars = !fullscreen
+            if (fullscreen) hide(WindowInsetsCompat.Type.systemBars()) else show(WindowInsetsCompat.Type.systemBars())
+        }
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus && fullscreenPlayer?.fullscreen == true) applyFullscreenSystemBars()
+    }
+
+    private fun toggleFullscreenPlayback() {
+        val player = mediaPlayer ?: return
+        // Unlike normal-page play, pausing here must not cancel an active sentence loop.
+        if (player.isPlaying) player.pause() else {
+            ensureVideoSurfaceBound()
+            hideVideoPreview()
+            val line = subtitles.getOrNull(selectedIndex)
+            if (line == null) normalPlayback = true
+            if (!normalPlayback && line != null && player.currentPosition >= playbackEndMs(selectedIndex, line)) {
+                seekTo(startMs(line), playWhenReady = true)
+            } else player.start()
+        }
+        updateButtons()
     }
 
     private fun withBottomNav(content: View): LinearLayout {
@@ -1562,13 +1672,24 @@ class LearningActivity : Activity() {
 
     private fun updateCurrentCaption() {
         val line = subtitles.getOrNull(selectedIndex)
+        val text = line?.currentCaptionText(showCurrentTranslation)
         if (line == null) {
             currentCaptionText.visibility = View.GONE
         } else {
             currentCaptionText.visibility = View.VISIBLE
-            currentCaptionText.text = clickableCaption(line.currentCaptionText(showCurrentTranslation))
+            if (currentCaptionText.text.toString() != text) currentCaptionText.text = clickableCaption(text.orEmpty())
             currentCaptionText.movementMethod = LinkMovementMethod.getInstance()
             currentCaptionText.linksClickable = true
+        }
+        fullscreenPlayer?.let { layout ->
+            // Share the exact learning-page sentence/translation choice, never a separate timeline.
+            if (layout.caption.text.toString() != text.orEmpty()) {
+                layout.updateCaption(text?.let { clickableCaption(it, android.graphics.Color.WHITE) })
+            }
+            val player = mediaPlayer
+            layout.updatePlayback(player?.isPlaying == true,
+                runCatching { player?.currentPosition ?: 0 }.getOrDefault(0),
+                runCatching { player?.duration ?: 0 }.getOrDefault(0))
         }
     }
 
@@ -1593,13 +1714,13 @@ class LearningActivity : Activity() {
         playbackTimeText.text = "${formatMs(positionMs.coerceAtLeast(0))} / ${formatMs(durationMs.coerceAtLeast(0))}"
     }
 
-    private fun clickableCaption(text: String): SpannableString {
+    private fun clickableCaption(text: String, color: Int = 0xFF0B6F6A.toInt()): SpannableString {
         val spannable = SpannableString(text)
         val used = BooleanArray(text.length)
 
         PhraseLibrary.findPhrases(text).forEach { span ->
             if (span.start >= 0 && span.end <= text.length && used.sliceArray(span.start until span.end).none { it }) {
-                spannable.setSpan(lookupSpan(span.phrase), span.start, span.end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                spannable.setSpan(lookupSpan(span.phrase, color), span.start, span.end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
                 for (i in span.start until span.end) used[i] = true
             }
         }
@@ -1608,13 +1729,13 @@ class LearningActivity : Activity() {
             val start = match.range.first
             val end = match.range.last + 1
             if (used.sliceArray(start until end).any { it }) return@forEach
-            spannable.setSpan(lookupSpan(match.value), start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            spannable.setSpan(lookupSpan(match.value, color), start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
         }
 
         return spannable
     }
 
-    private fun lookupSpan(term: String): ClickableSpan {
+    private fun lookupSpan(term: String, color: Int = 0xFF0B6F6A.toInt()): ClickableSpan {
         return object : ClickableSpan() {
             override fun onClick(widget: View) {
                 showLookup(term)
@@ -1622,13 +1743,20 @@ class LearningActivity : Activity() {
 
             override fun updateDrawState(ds: TextPaint) {
                 super.updateDrawState(ds)
-                ds.color = 0xFF0B6F6A.toInt()
+                ds.color = color
                 ds.isUnderlineText = false
             }
         }
     }
 
     private fun showLookup(term: String) {
+        if (lookupDialogOpen) return
+        val fullscreen = fullscreenPlayer?.fullscreen == true
+        val lookupPlayer = mediaPlayer
+        val resumeAfterLookup = fullscreen && lookupPlayer?.isPlaying == true
+        if (resumeAfterLookup) lookupPlayer?.pause()
+        if (fullscreen) fullscreenPlayer?.setModalOpen(true)
+        lookupDialogOpen = true
         val context = currentWordbookContext()
         val result = dictionary.lookupRich(term, context.englishText)
         saveWordbookEntry(result, context)
@@ -1692,6 +1820,14 @@ class LearningActivity : Activity() {
             .setTitle(result.term)
             .setView(scroll)
             .setPositiveButton("知道了", null)
+            .setOnDismissListener {
+                lookupDialogOpen = false
+                fullscreenPlayer?.setModalOpen(false)
+                if (resumeAfterLookup && mediaPlayer === lookupPlayer && activityResumed) {
+                    lookupPlayer?.start()
+                }
+                if (fullscreen) applyFullscreenSystemBars()
+            }
             .show()
     }
 
@@ -4285,6 +4421,3 @@ class LearningActivity : Activity() {
         }
     }
 }
-
-
-
