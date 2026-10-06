@@ -147,6 +147,40 @@ class FullscreenInstrumentation : Instrumentation() {
                 call("renderSubtitles")
             }
             await("seek to 12 seconds") { abs(player().currentPosition - 12000) < 500 }
+            test("inline_single_double_tap_hidden_controls_and_video_bound_progress") {
+                var x = 0f; var y = 0f
+                ui {
+                    val controls = field("inlinePlayerControls") as InlinePlayerControls
+                    controls.resetControls()
+                    checkThat(!find(activity.window.decorView, "全屏播放")!!.isShown, "Inline fullscreen icon initially visible")
+                    val location = IntArray(2); controls.getLocationOnScreen(location)
+                    x = location[0] + controls.width / 2f; y = location[1] + controls.height * .3f
+                }
+                capture("09-inline-clean")
+                touch(x, y)
+                ui {
+                    checkThat(!player().isPlaying, "Single tap started playback")
+                    val controls = field("inlinePlayerControls") as InlinePlayerControls
+                    val videoRect = android.graphics.Rect(); controls.getGlobalVisibleRect(videoRect)
+                    for (description in listOf("全屏播放", "学习视频播放进度", "学习视频播放或暂停")) {
+                        val view = find(activity.window.decorView, description)!!
+                        val rect = android.graphics.Rect(); view.getGlobalVisibleRect(rect)
+                        checkThat(view.isShown && videoRect.contains(rect), "$description outside video")
+                    }
+                }
+                capture("10-inline-controls")
+                touch(x, y, true)
+                await("inline double tap starts") { player().isPlaying }
+                SystemClock.sleep(3300)
+                ui { checkThat(!find(activity.window.decorView, "全屏播放")!!.isShown, "Inline controls did not auto-hide") }
+                touch(x, y, true)
+                await("inline double tap pauses") { !player().isPlaying }
+                ui { checkThat(field("normalPlayback") == false, "Inline gesture cancelled sentence mode") }
+                touch(x, y)
+                ui { checkThat(!find(activity.window.decorView, "全屏播放")!!.isShown, "Inline single tap did not hide") }
+                ui { call("seekTo", 12000, false) }
+                await("inline reset position") { abs(player().currentPosition - 12000) < 500 }
+            }
             test("same_player_surface_and_paused_position_across_rotation") {
                 val original = field("mediaPlayer")
                 val texture = field("textureView")
@@ -157,6 +191,57 @@ class FullscreenInstrumentation : Instrumentation() {
                     ui { checkThat(!player().isPlaying && abs(player().currentPosition - 12000) < 500, "Paused position changed") }
                     fullscreen(false)
                 }
+            }
+            test("inline_seek_and_fullscreen_entry_button") {
+                ui { (field("inlinePlayerControls") as InlinePlayerControls).showControls() }
+                click("全屏播放")
+                await("inline entry opens fullscreen") { layout().fullscreen && layout().width > layout().height }
+                SystemClock.sleep(600)
+                click("退出全屏")
+                await("exit returns portrait") { !layout().fullscreen && layout().height > layout().width }
+                SystemClock.sleep(600)
+                var x = 0f; var y = 0f
+                ui {
+                    checkThat(!find(activity.window.decorView, "全屏播放")!!.isShown, "Entry stayed visible on return")
+                    (field("inlinePlayerControls") as InlinePlayerControls).showControls()
+                    val seek = find(activity.window.decorView, "学习视频播放进度")!!
+                    val location = IntArray(2); seek.getLocationOnScreen(location)
+                    x = location[0] + seek.width / 2f; y = location[1] + seek.height / 2f
+                }
+                touch(x, y)
+                await("inline seek midpoint") { abs(player().currentPosition - player().duration / 2) < 6000 }
+                ui { checkThat(!player().isPlaying, "Inline seek started paused player") }
+                ui { call("seekTo", 12000, false); set("selectedIndex", 0); set("normalPlayback", false); call("updateCurrentCaption") }
+                await("inline seek reset") { abs(player().currentPosition - 12000) < 500 }
+            }
+            test("fullscreen_edge_chrome_and_previous_next_sentence") {
+                fullscreen(true)
+                ui {
+                    val back = find(activity.window.decorView, "退出全屏")!!
+                    val header = back.parent as View
+                    checkThat(header.top == 0 && header.left == 0 && header.width == layout().width, "Header background inset from screen edges")
+                    checkThat(layout().overlay.paddingTop == 0 && layout().overlay.paddingLeft == 0, "Entire overlay still inset")
+                    val insets = androidx.core.view.ViewCompat.getRootWindowInsets(layout())!!
+                    val visible = insets.getInsets(androidx.core.view.WindowInsetsCompat.Type.systemBars())
+                    val cutout = insets.getInsetsIgnoringVisibility(androidx.core.view.WindowInsetsCompat.Type.displayCutout())
+                    checkThat(back.top <= maxOf(visible.top, cutout.top) + (8 * activity.resources.displayMetrics.density).toInt(), "Back too far from safe top edge")
+                }
+                click("全屏下一句")
+                await("next sentence") { field("selectedIndex") == 1 && abs(player().currentPosition - 35000) < 1600 }
+                ui { player().pause(); checkThat(field("normalPlayback") == false, "Next lost sentence mode") }
+                click("全屏上一句")
+                await("previous sentence") { field("selectedIndex") == 0 && player().currentPosition < 1600 }
+                ui { player().pause(); call("seekTo", 32000, false); set("selectedIndex", -1); call("updateCurrentCaption") }
+                await("gap before next") { abs(player().currentPosition - 32000) < 500 }
+                click("全屏下一句")
+                await("next across gap") { field("selectedIndex") == 1 && abs(player().currentPosition - 35000) < 1600 }
+                ui { player().pause(); call("seekTo", 32000, false); set("selectedIndex", -1); call("updateCurrentCaption") }
+                await("gap before previous") { abs(player().currentPosition - 32000) < 500 }
+                click("全屏上一句")
+                await("previous across gap") { field("selectedIndex") == 0 && player().currentPosition < 1600 }
+                ui { player().pause(); call("seekTo", 12000, false); set("selectedIndex", 0); call("updateCurrentCaption") }
+                await("navigation reset") { abs(player().currentPosition - 12000) < 500 }
+                capture("11-fullscreen-edge-controls")
             }
             test("current_sentence_translation_and_empty_gap_match_learning_page") {
                 fullscreen(true)

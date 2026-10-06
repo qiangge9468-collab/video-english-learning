@@ -27,6 +27,8 @@ internal class FullscreenPlayerLayout(
     private val slot: View,
     private val exit: () -> Unit,
     private val togglePlayback: () -> Unit,
+    private val previousSentence: () -> Unit,
+    private val nextSentence: () -> Unit,
     private val seek: (Int) -> Unit
 ) : FrameLayout(context) {
     var fullscreen = false
@@ -55,7 +57,7 @@ internal class FullscreenPlayerLayout(
     private val gestures = GestureDetector(context, object : GestureDetector.SimpleOnGestureListener() {
         override fun onDown(e: MotionEvent) = true
         override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
-            if (controlsShown) hideControls() else showControls()
+            overlay.performClick()
             return true
         }
         override fun onDoubleTap(e: MotionEvent): Boolean {
@@ -71,6 +73,7 @@ internal class FullscreenPlayerLayout(
         addView(video, LayoutParams(-1, -1))
         addView(overlay, LayoutParams(-1, -1))
         overlay.visibility = GONE
+        overlay.setOnClickListener { if (controlsShown) hideControls() else showControls() }
         // Consume the whole stream, including the second UP of a double tap. It must
         // never fall through to the inline video's single-tap playback listener.
         overlay.setOnTouchListener { _, event -> gestures.onTouchEvent(event); true }
@@ -86,26 +89,31 @@ internal class FullscreenPlayerLayout(
         caption.onInteraction = { if (controlsShown) scheduleHide() }
         overlay.addView(caption, LayoutParams(-2, -2))
         top.gravity = Gravity.CENTER_VERTICAL
-        top.background = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(0xBB000000.toInt(), Color.TRANSPARENT))
-        top.addView(action("‹", "退出全屏", exit), LinearLayout.LayoutParams(dp(48), dp(48)))
+        top.background = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(0x99000000.toInt(), Color.TRANSPARENT))
+        top.addView(action("‹", "退出全屏", exit).apply { textSize = 30f }, LinearLayout.LayoutParams(dp(48), dp(48)))
         title.setTextColor(Color.WHITE)
         title.textSize = 16f
         title.maxLines = 1
         title.ellipsize = android.text.TextUtils.TruncateAt.END
         top.addView(title, LinearLayout.LayoutParams(0, dp(48), 1f))
         title.gravity = Gravity.CENTER_VERTICAL
-        overlay.addView(top, LayoutParams(-1, dp(56), Gravity.TOP))
+        overlay.addView(top, LayoutParams(-1, -2, Gravity.TOP))
 
         bottom.orientation = LinearLayout.VERTICAL
         bottom.background = GradientDrawable(GradientDrawable.Orientation.BOTTOM_TOP, intArrayOf(0xCC000000.toInt(), Color.TRANSPARENT))
         val row = LinearLayout(context).apply { gravity = Gravity.CENTER_VERTICAL }
+        row.addView(action("上句", "全屏上一句") { previousSentence(); showControls() }, LinearLayout.LayoutParams(dp(56), dp(48)))
         row.addView(play, LinearLayout.LayoutParams(dp(56), dp(48)))
+        row.addView(action("下句", "全屏下一句") { nextSentence(); showControls() }, LinearLayout.LayoutParams(dp(56), dp(48)))
+        row.addView(View(context), LinearLayout.LayoutParams(0, 1, 1f))
         time.setTextColor(Color.WHITE)
         time.textSize = 12f
-        row.addView(time)
+        val seekRow = LinearLayout(context).apply { gravity = Gravity.CENTER_VERTICAL }
         progress.max = 10000
         progress.contentDescription = "全屏播放进度"
-        row.addView(progress, LinearLayout.LayoutParams(0, dp(48), 1f))
+        seekRow.addView(progress, LinearLayout.LayoutParams(0, dp(36), 1f))
+        time.setPadding(dp(8), 0, dp(8), 0)
+        seekRow.addView(time)
         row.addView(action("字幕", "字幕大小和位置设置") {
             settings.visibility = if (settings.visibility == VISIBLE) GONE else VISIBLE
             showControls()
@@ -127,6 +135,7 @@ internal class FullscreenPlayerLayout(
         }, LinearLayout.LayoutParams(dp(56), dp(48)))
         settings.visibility = GONE
         bottom.addView(settings)
+        bottom.addView(seekRow)
         bottom.addView(row)
         overlay.addView(bottom, LayoutParams(-1, -2, Gravity.BOTTOM))
         setSubtitleLocked(caption.locked)
@@ -145,10 +154,14 @@ internal class FullscreenPlayerLayout(
             }
         })
         ViewCompat.setOnApplyWindowInsetsListener(this) { _, insets ->
-            // Reserve even transient/hidden bars: captions cannot be dragged behind a notch or clock.
-            val bars = insets.getInsetsIgnoringVisibility(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
-            safe = Rect(bars.left, bars.top, bars.right, bars.bottom)
-            overlay.setPadding(safe.left + dp(8), safe.top + dp(4), safe.right + dp(8), safe.bottom + dp(4))
+            // Hidden bars occupy no space. Only an actual cutout or currently visible
+            // system bar is reserved, and only inside the chrome (not its background).
+            val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
+            val cutout = insets.getInsetsIgnoringVisibility(WindowInsetsCompat.Type.displayCutout())
+            safe = Rect(maxOf(bars.left, cutout.left), maxOf(bars.top, cutout.top),
+                maxOf(bars.right, cutout.right), maxOf(bars.bottom, cutout.bottom))
+            top.setPadding(safe.left + dp(8), safe.top + dp(4), safe.right + dp(8), dp(4))
+            bottom.setPadding(safe.left + dp(8), 0, safe.right + dp(8), safe.bottom + dp(4))
             requestLayout()
             insets
         }
@@ -252,7 +265,7 @@ internal class FullscreenPlayerLayout(
         if (fullscreen) {
             // Keep the expanded size/lock panel clear of the caption too. The saved
             // normalized position is unchanged when this temporary panel closes.
-            val bottomClearance = if (controlsShown && settings.visibility == VISIBLE) 112 else 60
+            val bottomClearance = if (controlsShown && settings.visibility == VISIBLE) 140 else 92
             val area = Rect(safe.left + dp(16), safe.top + dp(60), width - safe.right - dp(16), height - safe.bottom - dp(bottomClearance))
             val maxWidth = (area.width() * .9f).toInt().coerceAtLeast(1)
             val maxHeight = area.height().coerceAtLeast(1)

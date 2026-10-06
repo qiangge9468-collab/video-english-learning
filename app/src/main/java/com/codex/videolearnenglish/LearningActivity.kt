@@ -101,7 +101,7 @@ class LearningActivity : Activity() {
     private var fullscreenPlayer: FullscreenPlayerLayout? = null
     private var configureLearningOrientation: (() -> Unit)? = null
     private var orientationBeforeFullscreen = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
-    private var fullscreenButton: TextView? = null
+    private var inlinePlayerControls: InlinePlayerControls? = null
     private var lookupDialogOpen = false
     private var activityResumed = false
     private var videoSurface: Surface? = null
@@ -466,21 +466,7 @@ class LearningActivity : Activity() {
             visibility = View.GONE
         }
         videoFrame.addView(videoPreviewImage, FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
-        val videoTapListener = View.OnClickListener { toggleNormalPlayback() }
-        videoFrame.setOnClickListener(videoTapListener)
-        textureView.setOnClickListener(videoTapListener)
-        videoPreviewImage.setOnClickListener(videoTapListener)
         val videoSlot = View(this)
-        fullscreenButton = TextView(this).apply {
-            text = "⛶"
-            contentDescription = "全屏播放"
-            textSize = 24f
-            gravity = Gravity.CENTER
-            setTextColor(android.graphics.Color.WHITE)
-            setBackgroundColor(0x66000000)
-            setOnClickListener { setFullscreen(true) }
-        }
-        videoFrame.addView(fullscreenButton, FrameLayout.LayoutParams(dp(48), dp(48), Gravity.BOTTOM or Gravity.END))
         if (landscape) {
             videoPane.addView(videoSlot, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
         } else {
@@ -503,10 +489,6 @@ class LearningActivity : Activity() {
         }
         videoPane.addView(transientNavRow)
 
-        val playbackProgressRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
         playbackSeekBar = SeekBar(this).apply {
             max = 1000
             progress = 0
@@ -521,6 +503,7 @@ class LearningActivity : Activity() {
 
                 override fun onStartTrackingTouch(seekBar: SeekBar?) {
                     isUserSeeking = true
+                    inlinePlayerControls?.setSeeking(true)
                 }
 
                 override fun onStopTrackingTouch(seekBar: SeekBar?) {
@@ -536,10 +519,10 @@ class LearningActivity : Activity() {
                         saveLearningState()
                     }
                     isUserSeeking = false
+                    inlinePlayerControls?.setSeeking(false)
                 }
             })
         }
-        playbackProgressRow.addView(playbackSeekBar, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         playbackTimeText = TextView(this).apply {
             text = "00:00 / 00:00"
             textSize = 12f
@@ -547,8 +530,9 @@ class LearningActivity : Activity() {
             gravity = Gravity.CENTER_VERTICAL
             setPadding(8, 0, 0, 0)
         }
-        playbackProgressRow.addView(playbackTimeText, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-        videoPane.addView(playbackProgressRow, LinearLayout.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        inlinePlayerControls = InlinePlayerControls(this, playbackSeekBar, playbackTimeText,
+            togglePlayback = { toggleFullscreenPlayback() }, enterFullscreen = { setFullscreen(true) })
+        videoFrame.addView(inlinePlayerControls, FrameLayout.LayoutParams(-1, -1))
 
         currentCaptionText = TextView(this).apply {
             textSize = 18f
@@ -648,6 +632,8 @@ class LearningActivity : Activity() {
         fullscreenPlayer = FullscreenPlayerLayout(this, withBottomNav(root), videoFrame, videoSlot,
             exit = { setFullscreen(false) },
             togglePlayback = { toggleFullscreenPlayback() },
+            previousSentence = { moveSelection(-1) },
+            nextSentence = { moveSelection(1) },
             seek = { targetMs ->
                 val playing = mediaPlayer?.isPlaying == true
                 normalPlayback = true
@@ -673,7 +659,8 @@ class LearningActivity : Activity() {
         if (layout.fullscreen == enabled || (enabled && mediaPlayer == null)) return
         if (enabled) orientationBeforeFullscreen = requestedOrientation
         layout.setFullscreen(enabled, currentVideoUri?.let { displayName(it) }.orEmpty())
-        fullscreenButton?.visibility = if (enabled) View.GONE else View.VISIBLE
+        inlinePlayerControls?.visibility = if (enabled) View.GONE else View.VISIBLE
+        inlinePlayerControls?.resetControls()
         applyFullscreenSystemBars()
         requestedOrientation = if (enabled) {
             val player = mediaPlayer
@@ -686,6 +673,13 @@ class LearningActivity : Activity() {
 
     private fun applyFullscreenSystemBars() {
         val fullscreen = fullscreenPlayer?.fullscreen == true
+        if (Build.VERSION.SDK_INT >= 28) {
+            window.attributes = window.attributes.apply {
+                layoutInDisplayCutoutMode = if (fullscreen)
+                    android.view.WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+                else android.view.WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_DEFAULT
+            }
+        }
         WindowCompat.setDecorFitsSystemWindows(window, !fullscreen)
         WindowCompat.getInsetsController(window, window.decorView).apply {
             systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
@@ -1671,6 +1665,7 @@ class LearningActivity : Activity() {
     }
 
     private fun updateCurrentCaption() {
+        inlinePlayerControls?.updatePlayback(mediaPlayer?.isPlaying == true)
         val line = subtitles.getOrNull(selectedIndex)
         val text = line?.currentCaptionText(showCurrentTranslation)
         if (line == null) {

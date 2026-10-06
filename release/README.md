@@ -4,7 +4,7 @@ This directory is intentionally tracked so GitHub users can install the Android 
 
 Expected files:
 
-- `app-v2.2.0.apk`: current recommended phone package (versionCode 28). Adds immersive fullscreen with the same current sentence and translation setting as the learning page, draggable/resizable/lockable subtitles, word lookup, and hideable title/playback controls. Reuses the player across fullscreen transitions. Pair with the existing v2.1.0 computer service. Earlier APKs remain untouched.
+- `app-v2.2.0.apk`: current recommended phone package (versionName 2.2.0, versionCode 29). Includes the fullscreen control-layout bug fix: edge-to-edge gradients with cutout-safe controls, previous/next sentence actions, and inline video controls that appear on single tap, with double-tap playback. Time, progress and fullscreen entry now live inside the learning-page video. Keeps current-sentence bilingual subtitles, dragging/resizing/locking and word lookup. Pair with the existing v2.1.0 computer service. The original versionCode 28 APK remains available at Git commit `47d1145`; all other versioned APKs remain untouched.
 - `app-v1.0.0.apk`: previous 1.0.0 package. It keeps the original single learning screen where video learning, subtitle generation, translation, replay, dictionary lookup, and subtitle export are all handled in one page.
 - `app-v2.0.0.apk`: previous 2.0.0 package with four-tab task management and batch caption generation.
 - `app-v2.0.1.apk`: previous 2.0.1 package. It adds explicit full bilingual subtitle regeneration, atomic cache replacement, reliable foreground processing across screen-off/unlock, and improved word lemmatization.
