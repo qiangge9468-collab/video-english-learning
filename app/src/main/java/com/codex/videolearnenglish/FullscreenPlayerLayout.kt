@@ -43,6 +43,13 @@ internal class FullscreenPlayerLayout(
     private val play = action("播放", "播放或暂停") { togglePlayback(); showControls() }
     private val progress = SeekBar(context)
     private val settings = LinearLayout(context)
+    private var subtitlesEnabled = preferences.getBoolean("subtitles_enabled", true)
+    private val subtitleToggle = action("字幕开", "关闭全屏字幕") {
+        subtitlesEnabled = !subtitlesEnabled
+        preferences.edit().putBoolean("subtitles_enabled", subtitlesEnabled).apply()
+        updateSubtitleVisibility()
+        showControls()
+    }
     private val lock = action("锁定位置", "锁定字幕位置和大小") { setSubtitleLocked(!caption.locked) }
     private var playing = false
     private var duration = 0
@@ -119,6 +126,7 @@ internal class FullscreenPlayerLayout(
             showControls()
         }, LinearLayout.LayoutParams(dp(56), dp(48)))
         settings.gravity = Gravity.CENTER_VERTICAL or Gravity.END
+        settings.addView(subtitleToggle, LinearLayout.LayoutParams(dp(72), dp(48)))
         settings.addView(action("A−", "缩小字幕") { changeFont(-2f) }, LinearLayout.LayoutParams(dp(52), dp(48)))
         settings.addView(action("A+", "放大字幕") { changeFont(2f) }, LinearLayout.LayoutParams(dp(52), dp(48)))
         settings.addView(lock, LinearLayout.LayoutParams(dp(100), dp(48)))
@@ -139,6 +147,7 @@ internal class FullscreenPlayerLayout(
         bottom.addView(row)
         overlay.addView(bottom, LayoutParams(-1, -2, Gravity.BOTTOM))
         setSubtitleLocked(caption.locked)
+        updateSubtitleVisibility()
         progress.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onStartTrackingTouch(bar: SeekBar?) {
                 draggingSeek = true
@@ -182,8 +191,16 @@ internal class FullscreenPlayerLayout(
         if (plain == lastCaption) return
         lastCaption = plain
         caption.text = text ?: ""
-        caption.visibility = if (plain.isBlank()) GONE else VISIBLE
+        updateSubtitleVisibility()
         requestLayout()
+    }
+
+    private fun updateSubtitleVisibility() {
+        // Keep receiving the current sentence even while hidden, so enabling subtitles
+        // restores the current text, never a stale sentence or a separate translation setting.
+        caption.visibility = if (subtitlesEnabled && lastCaption.isNotBlank()) VISIBLE else GONE
+        subtitleToggle.text = if (subtitlesEnabled) "字幕开" else "字幕关"
+        subtitleToggle.contentDescription = if (subtitlesEnabled) "关闭全屏字幕" else "开启全屏字幕"
     }
 
     fun updatePlayback(isPlaying: Boolean, positionMs: Int, durationMs: Int) {
@@ -236,7 +253,7 @@ internal class FullscreenPlayerLayout(
         preferences.edit().putBoolean("locked", locked).apply()
         for (i in 0 until settings.childCount) {
             val child = settings.getChildAt(i)
-            if (child !== lock) { child.isEnabled = !locked; child.alpha = if (locked) .4f else 1f }
+            if (child !== lock && child !== subtitleToggle) { child.isEnabled = !locked; child.alpha = if (locked) .4f else 1f }
         }
     }
 

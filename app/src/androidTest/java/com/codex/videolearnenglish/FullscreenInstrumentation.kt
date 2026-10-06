@@ -256,6 +256,43 @@ class FullscreenInstrumentation : Instrumentation() {
                 }
                 capture("01-bilingual-controls")
             }
+            test("fullscreen_subtitle_toggle_lock_current_sentence_and_gap") {
+                click("字幕大小和位置设置")
+                ui { if (!layout().caption.locked) find(activity.window.decorView, "锁定字幕位置和大小")!!.performClick() }
+                var x = 0f; var y = 0f
+                ui {
+                    val button = find(activity.window.decorView, "关闭全屏字幕")!!
+                    checkThat(button.isEnabled, "Subtitle lock disabled visibility switch")
+                    val p = IntArray(2); button.getLocationOnScreen(p)
+                    x = p[0] + button.width / 2f; y = p[1] + button.height / 2f
+                }
+                touch(x, y)
+                ui {
+                    checkThat(layout().caption.visibility == View.GONE, "Toggle did not hide caption")
+                    checkThat(field("showCurrentTranslation") == true, "Toggle changed learning translation")
+                }
+                capture("12-subtitles-off")
+                click("全屏下一句")
+                await("hidden caption next sentence") { field("selectedIndex") == 1 && player().currentPosition >= 35000 }
+                ui {
+                    player().pause()
+                    checkThat(layout().caption.visibility == View.GONE, "Next sentence made disabled caption visible")
+                }
+                click("开启全屏字幕")
+                ui {
+                    checkThat(layout().caption.isShown && layout().caption.text.contains("mountains"), "Enabling restored stale sentence")
+                    checkThat(layout().caption.text.toString() == (field("currentCaptionText") as TextView).text.toString(), "Restored caption differs from learning page")
+                }
+                capture("13-subtitles-on-current-sentence")
+                ui { call("seekTo", 32000, false); set("selectedIndex", -1); call("updateCurrentCaption") }
+                await("gap for caption toggle") { abs(player().currentPosition - 32000) < 500 }
+                click("关闭全屏字幕"); click("开启全屏字幕")
+                ui { checkThat(layout().caption.visibility == View.GONE, "Enabling in gap shows stale caption") }
+                ui { call("seekTo", 12000, false); set("selectedIndex", 0); call("updateCurrentCaption") }
+                await("restore first sentence") { abs(player().currentPosition - 12000) < 500 }
+                click("解锁字幕位置和大小")
+                click("字幕大小和位置设置")
+            }
             test("subtitle_drag_size_lock_and_reset") {
                 click("字幕大小和位置设置")
                 ui { if (layout().caption.locked) find(activity.window.decorView, "解锁字幕位置和大小")!!.performClick() }
@@ -382,6 +419,23 @@ class FullscreenInstrumentation : Instrumentation() {
                 click("字幕大小和位置设置")
                 fullscreen(false)
             }
+            test("subtitle_visibility_persists_without_hiding_learning_caption") {
+                fullscreen(true)
+                click("字幕大小和位置设置"); click("关闭全屏字幕")
+                fullscreen(false)
+                ui { checkThat((field("currentCaptionText") as TextView).isShown, "Fullscreen switch hid learning caption") }
+                fullscreen(true)
+                ui { checkThat(layout().caption.visibility == View.GONE, "Re-enter reset visibility") }
+                fullscreen(false)
+                ui { call("buildUi") }
+                await("player after visibility rebuild") { player().duration > 1000 }
+                fullscreen(true)
+                ui { checkThat(layout().caption.visibility == View.GONE, "Rebuild reset visibility preference") }
+                click("字幕大小和位置设置"); click("开启全屏字幕")
+                ui { checkThat(layout().caption.isShown, "Enable after rebuild failed") }
+                click("字幕大小和位置设置")
+                fullscreen(false)
+            }
             test("background_pauses_and_return_does_not_autoplay") {
                 fullscreen(true)
                 ui { set("normalPlayback", true); player().start() }
@@ -412,6 +466,16 @@ class FullscreenInstrumentation : Instrumentation() {
                     checkThat(activity.resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT, "Portrait video rotated sideways")
                 }
                 capture("08-portrait-video")
+                click("字幕大小和位置设置")
+                ui {
+                    val screen = android.graphics.Rect(); layout().getGlobalVisibleRect(screen)
+                    for (description in listOf("关闭全屏字幕", "缩小字幕", "放大字幕", "锁定字幕位置和大小", "恢复字幕默认位置和大小")) {
+                        val button = find(activity.window.decorView, description)!!
+                        val bounds = android.graphics.Rect(); button.getGlobalVisibleRect(bounds)
+                        checkThat(button.isShown && bounds.width() == button.width && screen.contains(bounds), "Portrait subtitle setting clipped: $description")
+                    }
+                }
+                capture("14-portrait-subtitle-settings")
                 fullscreen(false)
                 ui {
                     set("pendingResumePositionMs", 12000); set("selectedIndex", 0)
