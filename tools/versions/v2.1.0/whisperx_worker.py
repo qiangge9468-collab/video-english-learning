@@ -35,6 +35,8 @@ def main():
     parser.add_argument("--language", default="en")
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--model-dir", required=True)
+    parser.add_argument("--quality-guard", action="store_true",
+                        help="Experimental lossless alignment with explicit unresolved diagnostics")
     args = parser.parse_args()
 
     os.makedirs(args.model_dir, exist_ok=True)
@@ -66,6 +68,21 @@ def main():
         device=args.device,
         model_dir=args.model_dir,
     )
+    if args.quality_guard:
+        from guarded_alignment import align_guarded
+
+        def align_one(segment):
+            aligned = whisperx.align([segment], model_a, metadata, audio, args.device,
+                                     interpolate_method="ignore", return_char_alignments=False)
+            return [word for part in aligned.get("segments", []) for word in part.get("words", [])]
+
+        segments, words, debug = align_guarded(source_segments, payload.get("words", []),
+                                               align_one, len(audio)/16000)
+        debug.update(language=args.language, device=args.device)
+        if not words:
+            raise RuntimeError("WhisperX returned no source words")
+        write_json_atomic(args.output, {"segments": segments, "words": words, "debug": debug})
+        return
     aligned = whisperx.align(
         transcript,
         model_a,

@@ -36,3 +36,7 @@ models/
 # OS noise
 .DS_Store
 Thumbs.db
+
+# Local reference extraction / experiment outputs (never publish source videos).
+.validation-deps/
+.validation/

@@ -96,8 +96,12 @@ if (-not $env:TRANSLATION_TARGET_LANGUAGE) {
     $env:TRANSLATION_TARGET_LANGUAGE = "zho_Hans"
 }
 if (-not $env:TRANSLATION_STYLE) {
-    $env:TRANSLATION_STYLE = "subtitle"
+    $env:TRANSLATION_STYLE = "generic"
 }
+if (-not $env:TRANSLATION_CONTEXT_MODE) {
+    $env:TRANSLATION_CONTEXT_MODE = "auto"
+}
+Write-Host "Chinese translation: local context auto-detection; existing translator fallback. Set TRANSLATION_CONTEXT_MODE=off to disable." -ForegroundColor Cyan
 
 function Repair-LocalProxyEnv {
     $names = @("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy")
@@ -733,7 +737,7 @@ if ($adb) {
 }
 
 $serviceJobScript = {
-    param($Root, $ListenPort, $AuthToken, $ConfigPath, $StatusPath, $RuntimePath, $TranslationProvider, $TranslationModel, $TranslationDevice, $TranslationSourceLanguage, $TranslationTargetLanguage, $TranslationStyle, $WhisperDevice, $WhisperComputeType, $WhisperEnglishModel, $WhisperHotwords, $WhisperInitialPrompt)
+    param($Root, $ListenPort, $AuthToken, $ConfigPath, $StatusPath, $RuntimePath, $TranslationProvider, $TranslationModel, $TranslationDevice, $TranslationSourceLanguage, $TranslationTargetLanguage, $TranslationStyle, $WhisperDevice, $WhisperComputeType, $WhisperEnglishModel, $WhisperHotwords, $WhisperInitialPrompt, $ContextMode)
     Set-Location $Root
     $env:PATH = $RuntimePath
     $env:WHISPER_PORT = "$ListenPort"
@@ -758,6 +762,7 @@ $serviceJobScript = {
     $env:TRANSLATION_SOURCE_LANGUAGE = $TranslationSourceLanguage
     $env:TRANSLATION_TARGET_LANGUAGE = $TranslationTargetLanguage
     $env:TRANSLATION_STYLE = $TranslationStyle
+    $env:TRANSLATION_CONTEXT_MODE = $ContextMode
     $env:WHISPER_DEVICE = $WhisperDevice
     $env:WHISPER_COMPUTE_TYPE = $WhisperComputeType
     $env:WHISPER_ENGLISH_MODEL = $WhisperEnglishModel
@@ -781,7 +786,7 @@ $serviceJobArguments = @(
     $env:TRANSLATION_PROVIDER, $env:TRANSLATION_MODEL, $env:TRANSLATION_DEVICE,
     $env:TRANSLATION_SOURCE_LANGUAGE, $env:TRANSLATION_TARGET_LANGUAGE,
     $env:TRANSLATION_STYLE, $env:WHISPER_DEVICE, $env:WHISPER_COMPUTE_TYPE,
-    $env:WHISPER_ENGLISH_MODEL, $env:WHISPER_HOTWORDS, $env:WHISPER_INITIAL_PROMPT
+    $env:WHISPER_ENGLISH_MODEL, $env:WHISPER_HOTWORDS, $env:WHISPER_INITIAL_PROMPT, $env:TRANSLATION_CONTEXT_MODE
 )
 function Start-ServiceBackgroundJob {
     return Start-Job -ArgumentList $serviceJobArguments -ScriptBlock $serviceJobScript

@@ -17,6 +17,20 @@ SENTENCE_END_RE = re.compile(r"[.!?][\"')\]]*$")
 SOFT_END_RE = re.compile(r"[,;:][\"')\]]*$")
 WORD_RE = re.compile(r"[A-Za-z']+")
 
+# Prefix titles are not sentence ends. Do not blanket-protect e.g. U.S. or
+# etc., which can legitimately finish a sentence.
+TITLE_ABBREVIATIONS = {"mr.", "mrs.", "ms.", "dr.", "prof.", "rev.", "hon."}
+
+
+def abbreviation_continues(left: str, right: str) -> bool:
+    left = left.strip().strip('\"\u201c\u201d(\'')
+    right = right.strip().lstrip('\"\u201c\u201d(\'')
+    if not right or not re.match(r"[A-Za-z]", right):
+        return False
+    if left.lower() in TITLE_ABBREVIATIONS:
+        return True
+    return bool(re.fullmatch(r"[A-HJ-Z]\.", left) and re.match(r"[A-Z]", right))
+
 FUNCTION_WORDS = {
     "a", "an", "the", "to", "of", "with", "for", "from", "into", "on", "in",
     "at", "by", "and", "but", "or", "because", "that", "which", "who", "whom",
@@ -53,6 +67,18 @@ class SegmenterConfig:
     orphan_probability_threshold: float = 0.58
     orphan_merge_gap_seconds: float = 8.0
     analysis_chunk_words: int = 180
+    # Experimental, opt-in until independent full-video reference gates pass.
+    learning_sentence_mode: bool = False
+    learning_max_words: int = 100
+    learning_boundary_probability: float = 0.75
+    # Playback/translation safety, not proof of a linguistic sentence end.
+    learning_max_join_gap_seconds: float = 4.0
+    # Separate experiment: broad parser arcs can span two unpunctuated clauses.
+    # Concrete phrase/subject/object links still protect their word boundaries.
+    learning_soft_dependency_boundaries: bool = False
+    # Independent punctuation is optional evidence, not an ASR text rewrite.
+    learning_punctuation_threshold: float | None = None
+    learning_speaker_boundaries: bool = False
 
 
 @dataclass
@@ -71,6 +97,9 @@ class BoundaryFeatures:
     previous_dependency: str = ""
     next_dependency: str = ""
     forced_silence: bool = False
+    protected_by_abbreviation: bool = False
+    restored_terminal_probability: float | None = None
+    acoustic_speaker_change: bool = False
 
     @property
     def protected(self) -> bool:
@@ -79,6 +108,7 @@ class BoundaryFeatures:
             or self.protected_by_entity
             or self.protected_by_dependency
             or self.protected_by_pos_pair
+            or self.protected_by_abbreviation
         )
 
 
@@ -94,12 +124,15 @@ def normalized_word(raw: dict[str, Any], index: int) -> dict[str, Any] | None:
     except (TypeError, ValueError):
         probability = None
     return {
+        **raw,
         "index": int(raw.get("index", index)),
         "segment_id": raw.get("segment_id"),
         "start": start,
         "end": end,
         "text": text,
-        "probability": probability,
+        # Alignment scores are NOT recognition probabilities. Older caches
+        # used the same key for both; never feed those scores to word deletion.
+        "probability": raw.get("asr_probability") if raw.get("aligned_by") == "whisperx" else probability,
         "segment_end": bool(raw.get("segment_end", False)),
         "segment_complete": bool(raw.get("segment_complete", False)),
         "acoustic_silence_before": bool(raw.get("acoustic_silence_before", False)),
@@ -180,11 +213,12 @@ def _mark_span_boundaries(
     start_char: int,
     end_char: int,
     attribute: str,
+    chunk_start: int = 0,
 ) -> None:
     for boundary_index in range(1, len(offsets)):
         boundary_char = offsets[boundary_index - 1][1]
         if start_char < boundary_char < end_char:
-            setattr(features[boundary_index], attribute, True)
+            setattr(features[chunk_start + boundary_index], attribute, True)
 
 
 def _pos_pair_is_protected(left_pos: str, right_pos: str) -> bool:
@@ -215,6 +249,9 @@ def analyze_boundaries(
         punctuation_match = re.search(r"([,.!?;:])[\"')\]]*$", previous_text)
         features[index].gap = gap
         features[index].punctuation = punctuation_match.group(1) if punctuation_match else ""
+        if abbreviation_continues(previous_text, words[index]["text"]):
+            features[index].protected_by_abbreviation = True
+            features[index].punctuation = ""
         # Whisper word timestamps can place a segment's first word several
         # seconds early. A timestamp gap alone is therefore evidence, not a
         # hard acoustic boundary. Only a separately verified VAD marker may
@@ -293,6 +330,7 @@ def analyze_boundaries(
                         int(chunk.start_char),
                         int(chunk.end_char),
                         "protected_by_noun_chunk",
+                        chunk_start,
                     )
                 for entity in getattr(doc, "ents", []):
                     _mark_span_boundaries(
@@ -301,6 +339,7 @@ def analyze_boundaries(
                         int(entity.start_char),
                         int(entity.end_char),
                         "protected_by_entity",
+                        chunk_start,
                     )
 
                 token_word_indices: dict[int, int] = {}
@@ -313,6 +352,10 @@ def analyze_boundaries(
                 for token_index, token in enumerate(tokens):
                     local_index = token_word_indices.get(token_index)
                     if local_index is None:
+                        continue
+                    if str(token.pos_) == 'PUNCT':
+                        # "it." maps both a pronoun and '.' to the same ASR
+                        # word. Keep the lexical dependency, not the last dot.
                         continue
                     global_index = chunk_start + local_index
                     if global_index > chunk_start:
@@ -439,7 +482,10 @@ def optimize_segments(
             candidate_words = words[start:end]
             text = words_to_text(candidate_words)
             duration = float(candidate_words[-1]["end"]) - float(candidate_words[0]["start"])
-            if duration > config.max_seconds or len(text) > config.max_chars:
+            # A single ASR token may itself exceed a display limit (bad timing,
+            # a URL, etc.). Keep it and report it rather than making the entire
+            # film's path impossible and silently falling back to legacy cuts.
+            if end > start + 1 and (duration > config.max_seconds or len(text) > config.max_chars):
                 break
             if any(features[index].forced_silence for index in range(start + 1, end)):
                 break
@@ -506,6 +552,12 @@ def optimize_segments(
         "config": asdict(config),
         "decisions": decisions,
         "boundaries": [asdict(feature) for feature in features[1:-1]],
+        "oversize_tokens": [
+            {"index": i, "text": word["text"], "start": word["start"], "end": word["end"]}
+            for i, word in enumerate(words)
+            if word["end"] - word["start"] > config.max_seconds
+            or len(word["text"]) > config.max_chars
+        ],
     }
 
 
@@ -594,6 +646,7 @@ def filter_orphan_function_words(
 def clean_segments(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [
         {
+            **{key: value for key, value in segment.items() if not key.startswith("_")},
             "start": float(segment["start"]),
             "end": float(segment["end"]),
             "text": " ".join(str(segment["text"]).split()),
@@ -602,6 +655,157 @@ def clean_segments(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
         for segment in segments
         if str(segment.get("text", "")).strip()
     ]
+
+
+def learning_boundary_protected(feature, config):
+    if feature.protected_by_abbreviation:
+        return True
+    if not config.learning_soft_dependency_boundaries:
+        return feature.protected
+    if feature.protected_by_noun_chunk or feature.protected_by_entity or feature.protected_by_pos_pair:
+        return True
+    if not feature.protected_by_dependency:
+        return False
+    # Do not interpret any arc crossing this point as an unbreakable phrase.
+    # Retain concrete complements and subject/predicate links; a semantic model
+    # may override the other, softer arcs in unpunctuated conversational ASR.
+    return (feature.next_dependency in {'dobj', 'obj', 'iobj', 'pobj', 'aux', 'auxpass', 'neg', 'prt', 'compound'}
+            or (feature.previous_dependency in {'nsubj', 'nsubjpass', 'csubj'}
+                and feature.next_pos in {'VERB', 'AUX'}))
+
+
+def apply_speaker_evidence(words, features, speaker, config):
+    """Project already validated evidence; ungated embedding-only models need text support."""
+    rejected = []
+    for boundary in speaker['boundaries']:
+        index = boundary['word_boundary']
+        if type(index) is not int or not 0 < index < len(words):
+            raise ValueError('Invalid speaker word boundary')
+        if speaker.get('requires_semantic_support'):
+            last = _last_lexical_word(words[index-1]['text'])
+            weak = last in (FUNCTION_WORDS | {'i','you','we','they','he','she','it'})
+            # A lexical verb can finish a question even if the same spelling
+            # also serves as an auxiliary. Require three independent signals:
+            # acoustic turn, high sentence probability and restored punctuation.
+            f = features[index]
+            if (f.previous_pos == 'VERB' and f.previous_dependency == 'ROOT'
+                    and f.sat_probability >= .9
+                    and (f.restored_terminal_probability or 0) >= .8):
+                weak = False
+            if features[index].sat_probability < .1 or weak or learning_boundary_protected(features[index], config):
+                rejected.append(index)
+                continue
+        features[index].acoustic_speaker_change = True
+    return rejected
+
+
+def learning_sentences(words, features, config):
+    """Keep translation/practice units independent of display length limits.
+
+    All input words are conserved in source order. Display cues carry word
+    ranges, never independently translated fragments or inferred word times.
+    """
+    pronouns = {"i", "you", "we", "they", "he", "she", "it"}
+    weak_ends = FUNCTION_WORDS | pronouns
+    cuts = [0]
+    warnings = []
+    review_boundaries = set()
+    for index in range(1, len(words)):
+        feature = features[index]
+        previous = _last_lexical_word(words[index-1]["text"])
+        following = _first_lexical_word(words[index]["text"])
+        incomplete = previous in weak_ends or learning_boundary_protected(feature, config)
+        # Standalone "It!" etc. is possible: preservation wins; a high model
+        # probability can override a lexical heuristic, but not a protected pair.
+        strong = bool(feature.punctuation and feature.punctuation in ".!?")
+        model_boundary = feature.sat_probability >= config.learning_boundary_probability
+        restored_boundary = (
+            config.learning_punctuation_threshold is not None
+            and feature.restored_terminal_probability is not None
+            and feature.restored_terminal_probability >= config.learning_punctuation_threshold
+        )
+        if (restored_boundary and feature.sat_probability >= config.learning_boundary_probability
+                and feature.previous_dependency in {'dobj', 'obj', 'pobj', 'attr'}
+                and feature.next_pos not in {'AUX', 'VERB', 'ADP', 'PART'}
+                and not learning_boundary_protected(feature, config)):
+            # An object pronoun can complete a clause ("learn from it.").
+            # A subject followed by an auxiliary ("we are") remains protected.
+            incomplete = False
+        if (strong and model_boundary and feature.previous_dependency in {'dobj', 'obj', 'pobj', 'attr'}
+                and not feature.protected_by_entity and not feature.protected_by_abbreviation):
+            # POS adjacency is not a subject link across an explicit full stop:
+            # "We can do this. We're ready." must not become a single sentence.
+            incomplete = False
+        # Dependency arcs sometimes span punctuation in noisy ASR text. Do not
+        # merge two complete sentences merely because the parser spans them
+        # (e.g. "more than that. Yeah, ..."). Protect a broken pronoun/auxiliary
+        # or entity, but allow a normal multiword sentence ending in "that".
+        strong_boundary = strong and not feature.protected_by_entity and (
+            not incomplete or (model_boundary and not feature.protected_by_pos_pair) or (
+                index-cuts[-1] >= 4 and not feature.protected_by_pos_pair
+                and previous not in pronouns
+            )
+        )
+        if feature.protected_by_abbreviation:
+            strong_boundary = False
+        long_gap = feature.gap >= config.learning_max_join_gap_seconds
+        if long_gap and not feature.forced_silence:
+            review_boundaries.add(index)
+            warnings.append({'kind': 'long_word_gap_boundary', 'word_boundary': index,
+                             'gap_seconds': feature.gap,
+                             'reason': 'bounded learning unit; word gap is not verified silence'})
+        speaker_boundary = config.learning_speaker_boundaries and feature.acoustic_speaker_change
+        if speaker_boundary:
+            # Even strong local audio evidence is still a model prediction.
+            # Preserve a review flag instead of claiming a verified turn.
+            review_boundaries.add(index)
+            warnings.append({'kind': 'acoustic_speaker_boundary', 'word_boundary': index,
+                             'semantic_conflict': bool(incomplete)})
+        should_cut = speaker_boundary or feature.forced_silence or long_gap or (
+            strong_boundary or ((model_boundary or restored_boundary) and not incomplete)
+        )
+        if should_cut:
+            cuts.append(index)
+        elif index - cuts[-1] >= config.learning_max_words:
+            # Translation-model context safety, not a 12-second display limit.
+            # Choose a clause boundary and explicitly report the forced split.
+            candidates = list(range(cuts[-1]+1, index+1))
+            safe = [i for i in candidates if not features[i].protected
+                    and _last_lexical_word(words[i-1]["text"]) not in weak_ends]
+            candidates = safe or candidates
+            selected = max(candidates, key=lambda i: (
+                features[i].sat_probability + (.25 if features[i].punctuation else 0)
+                + min(max(features[i].gap, 0), 1) * .1,
+                i,
+            ))
+            cuts.append(selected)
+            warnings.append({"kind": "learning_context_limit", "word_boundary": selected})
+    cuts.append(len(words))
+    sentences = []
+    for sentence_id, (start, end) in enumerate(zip(cuts, cuts[1:])):
+        selected = words[start:end]
+        local_features = [BoundaryFeatures(**asdict(item)) for item in features[start:end+1]]
+        cues, cue_debug = optimize_segments(selected, local_features, config)
+        display = [{"start": cue["start"], "end": cue["end"], "text": cue["text"],
+                    "word_start": start + cue["_word_start"],
+                    "word_end": start + cue["_word_end"],
+                    "learning_sentence_id": sentence_id} for cue in cues]
+        warnings.extend({**item, "kind": "oversize_token"} for item in cue_debug["oversize_tokens"])
+        unresolved = sum(word.get("alignment_status", "aligned") != "aligned" for word in selected)
+        text_review = sum(bool(word.get("recovered") or word.get("recovery_review_required")) for word in selected)
+        sentences.append({"start": selected[0]["start"], "end": max(word["end"] for word in selected),
+                          "text": words_to_text(selected), "translation": "",
+                          "learning_sentence_id": sentence_id,
+                          "boundary_review_required": start in review_boundaries or end in review_boundaries,
+                          "alignment_review_required": bool(unresolved),
+                          "alignment_review_word_count": unresolved,
+                          "text_review_required": bool(text_review), "text_review_word_count": text_review,
+                          "word_start": start, "word_end": end, "display_cues": display})
+    return sentences, {"algorithm": "learning-sentence-experiment-v2", "config": asdict(config),
+                       "word_count": len(words), "segment_count": len(sentences),
+                       "warnings": warnings, "cuts": cuts,
+                       "boundaries": [asdict(f) for f in features[1:-1]],
+                       "removed_orphans": []}
 
 
 def segment_words(
@@ -615,6 +819,8 @@ def segment_words(
     if not words:
         return [], {"algorithm": "semantic-viterbi-v2", "error": "no words"}
     features = analyze_boundaries(words, sat_model=sat_model, spacy_nlp=spacy_nlp, config=config)
+    if config.learning_sentence_mode:
+        return learning_sentences(words, features, config)
     segments, debug = optimize_segments(words, features, config)
     segments, removed = filter_orphan_function_words(segments, config)
     debug["removed_orphans"] = removed

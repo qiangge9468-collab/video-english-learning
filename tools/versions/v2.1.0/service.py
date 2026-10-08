@@ -1,6 +1,8 @@
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import collections
 import gc
+import functools
+import inspect
 import json
 import os
 import queue
@@ -24,6 +26,9 @@ for module_dir in (SERVICE_DIR, SHARED_DIR):
 
 from durable_job_store import DurableJobStore
 from semantic_caption_segmenter_v206 import SegmenterConfig, segment_words as semantic_segment_words
+from speech_coverage import expand_to_word_gaps
+from recovery_decode import decode_gap
+from context_translation import LocalContextTranslator
 
 VIDEO_PATHS = {
     "backpacking": r"C:\Users\ASUS\Downloads\Full Gear List for Solo Backpacking.mp4",
@@ -131,7 +136,9 @@ TRANSLATION_MODEL = os.environ.get("TRANSLATION_MODEL", DEFAULT_TRANSLATION_MODE
 TRANSLATION_DEVICE = os.environ.get("TRANSLATION_DEVICE", "auto").strip().lower()
 TRANSLATION_SOURCE_LANGUAGE = os.environ.get("TRANSLATION_SOURCE_LANGUAGE", "eng_Latn").strip()
 TRANSLATION_TARGET_LANGUAGE = os.environ.get("TRANSLATION_TARGET_LANGUAGE", "zho_Hans").strip()
-TRANSLATION_STYLE = os.environ.get("TRANSLATION_STYLE", "subtitle").strip().lower()
+TRANSLATION_STYLE = os.environ.get("TRANSLATION_STYLE", "generic" if
+    os.environ.get("SUBTITLE_LEARNING_SENTENCES_EXPERIMENT", "").lower() in ("1", "true", "yes", "on")
+    else "subtitle").strip().lower()
 TRANSLATION_LOCAL_FILES_ONLY = os.environ.get("TRANSLATION_LOCAL_FILES_ONLY", "auto").strip().lower()
 DEVICE_FALLBACK = os.environ.get("MODEL_DEVICE_FALLBACK", "1").strip().lower() not in ("0", "false", "no", "off")
 WHISPER_HOTWORDS = os.environ.get(
@@ -172,7 +179,8 @@ _semantic_models = None
 _models_last_used_at = 0.0
 _jobs_lock = threading.Lock()
 _jobs = {}
-_job_execution_lock = threading.Lock()
+_job_execution_lock = threading.RLock()
+_context_translator = None
 _runtime_status_lock = threading.Lock()
 _job_queue = queue.Queue()
 _queued_job_ids = set()
@@ -601,6 +609,10 @@ def build_transcription_context(video_title=""):
     title_hotwords = extract_title_hotwords(title)
     if title_hotwords:
         hotword_parts.append(", ".join(title_hotwords))
+    if env_enabled("SUBTITLE_LEARNING_SENTENCES_EXPERIMENT", False):
+        # Generic experimental pipeline: use only explicitly supplied context
+        # and title keywords, never inject a hard-coded travel/gear vocabulary.
+        return (" ".join(prompt_parts).strip() or None, ", ".join(hotword_parts).strip() or None)
     is_outdoor = bool(re.search(
         r"\b(hik|backpack|camp|trail|mountain|outdoor|gear|trek|switzerland|pakistan)\w*\b",
         title,
@@ -1093,6 +1105,7 @@ def semantic_tokenizer_path():
 
 def semantic_segmenter_config():
     return SegmenterConfig(
+        learning_sentence_mode=env_enabled("SUBTITLE_LEARNING_SENTENCES_EXPERIMENT", False),
         min_seconds=MIN_SUBTITLE_SECONDS,
         target_seconds=TARGET_SUBTITLE_SECONDS,
         preferred_max_seconds=PREFERRED_MAX_SUBTITLE_SECONDS,
@@ -1124,7 +1137,7 @@ def whisperx_python_path():
     )
 
 
-def run_whisperx_alignment(video_path, raw_segments, language):
+def run_whisperx_alignment(video_path, raw_segments, language, raw_words=None):
     python_path = whisperx_python_path()
     worker_path = os.path.join(SERVICE_DIR, "whisperx_worker.py")
     if not os.path.isfile(python_path):
@@ -1142,7 +1155,7 @@ def run_whisperx_alignment(video_path, raw_segments, language):
     os.close(output_fd)
     try:
         with os.fdopen(input_fd, "w", encoding="utf-8") as handle:
-            json.dump({"segments": raw_segments}, handle, ensure_ascii=False)
+            json.dump({"segments": raw_segments, "words": raw_words or []}, handle, ensure_ascii=False)
         environment = dict(os.environ)
         environment["TORCH_HOME"] = WHISPERX_MODEL_DIR
         environment["HF_HOME"] = WHISPERX_MODEL_DIR
@@ -1162,6 +1175,8 @@ def run_whisperx_alignment(video_path, raw_segments, language):
             "--model-dir",
             WHISPERX_MODEL_DIR,
         ]
+        if env_enabled("WHISPERX_QUALITY_GUARD_EXPERIMENT", False):
+            command.append("--quality-guard")
         timeout = int(os.environ.get("WHISPERX_WORKER_TIMEOUT_SECONDS", "1800"))
         completed = subprocess.run(
             command,
@@ -1181,7 +1196,15 @@ def run_whisperx_alignment(video_path, raw_segments, language):
         debug = payload.get("debug")
         if not isinstance(aligned_segments, list) or not isinstance(aligned_words, list) or not isinstance(debug, dict):
             raise RuntimeError("WhisperX worker returned an invalid payload")
-        aligned_segments, aligned_words = rebuild_raw_transcription_artifacts(aligned_segments, aligned_words)
+        if not debug.get("quality_guard"):
+            aligned_segments, aligned_words = rebuild_raw_transcription_artifacts(aligned_segments, aligned_words)
+        else:
+            expected = [(source_id, token_id, token) for source_id, source in enumerate(raw_segments)
+                        for token_id, token in enumerate(str(source.get("text", "")).split())]
+            actual = sorted((w["source_segment_id"], w["source_token_index"], w.get("text"))
+                            for w in aligned_words)
+            if actual != expected:
+                raise RuntimeError("Guarded alignment failed source token conservation")
         return aligned_segments, aligned_words, debug
     finally:
         for path in (input_path, output_path):
@@ -1315,7 +1338,7 @@ def find_uncovered_speech_gaps(raw_words, speech_ranges, audio_duration=None):
         if end - cursor >= SPEECH_GAP_MIN_SECONDS:
             chunks.append((cursor, end))
     return chunks
-def rebuild_raw_transcription_artifacts(raw_segments, raw_words):
+def rebuild_raw_transcription_artifacts(raw_segments, raw_words, deduplicate=True):
     words = []
     for item in sorted(raw_words, key=lambda value: (float(value["start"]), float(value["end"]))):
         normalized = " ".join(str(item.get("text", "")).split())
@@ -1325,7 +1348,7 @@ def rebuild_raw_transcription_artifacts(raw_segments, raw_words):
             previous = words[-1]
             same_word = normalize_prompt_echo_text(previous.get("text")) == normalize_prompt_echo_text(normalized)
             overlaps = float(item["start"]) < float(previous["end"]) - 0.08
-            if same_word and overlaps:
+            if deduplicate and same_word and overlaps:
                 continue
         clean = dict(item)
         clean["text"] = normalized
@@ -1495,8 +1518,10 @@ def segmentation_quality_penalty(segments):
     return penalty, details
 
 
-def recover_uncovered_speech(model, video_path, raw_segments, raw_words, language, video_title, progress=None):
-    debug = {"candidates": [], "recovered": [], "rejected_hallucinations": [], "error": ""}
+def recover_uncovered_speech(model, video_path, raw_segments, raw_words, language, video_title, progress=None,
+                             whole_word_gap=False):
+    debug = {"candidates": [], "recovered": [], "rejected_hallucinations": [],
+             "rejected_candidates": [], "empty_windows": [], "decode_windows": [], "error": ""}
     if len(raw_words) < 2:
         return raw_segments, raw_words, debug
     try:
@@ -1504,11 +1529,20 @@ def recover_uncovered_speech(model, video_path, raw_segments, raw_words, languag
         from faster_whisper.vad import VadOptions, get_speech_timestamps
 
         audio = decode_audio(video_path, sampling_rate=16000)
-        vad_options = VadOptions(onset=0.35, offset=0.30, min_silence_duration_ms=250, speech_pad_ms=200)
+        # faster-whisper 1.1 uses onset/offset; 1.2 uses threshold/neg_threshold.
+        names = inspect.signature(VadOptions).parameters
+        thresholds = {"threshold": .35, "neg_threshold": .30} if "threshold" in names else {"onset": .35, "offset": .30}
+        vad_options = VadOptions(**thresholds, min_silence_duration_ms=250, speech_pad_ms=200)
         speech_chunks = get_speech_timestamps(audio, vad_options)
         speech_ranges = [(item["start"] / 16000.0, item["end"] / 16000.0) for item in speech_chunks]
         audio_duration = len(audio) / 16000.0
+        debug["speech_ranges"] = speech_ranges
+        debug["audio_duration"] = audio_duration
         gaps = find_uncovered_speech_gaps(raw_words, speech_ranges, audio_duration)
+        if whole_word_gap:
+            debug["vad_candidates_before_expansion"] = gaps
+            gaps = expand_to_word_gaps(gaps, raw_words, audio_duration)
+            debug["whole_word_gap"] = True
         debug["candidates"] = [{"start": start, "end": end} for start, end in gaps]
         if not gaps:
             return raw_segments, raw_words, debug
@@ -1522,11 +1556,14 @@ def recover_uncovered_speech(model, video_path, raw_segments, raw_words, languag
         recovered_segments = []
         for gap_index, (gap_start, gap_end) in enumerate(gaps, start=1):
             report(progress, "postprocessing", 87, f"Checking speech gap {gap_index}/{len(gaps)} at {format_seconds(gap_start)}")
-            clip_start = max(0.0, gap_start - SPEECH_GAP_PAD_SECONDS)
-            clip_end = min(len(audio) / 16000.0, gap_end + SPEECH_GAP_PAD_SECONDS)
+            padding = .35 if whole_word_gap else SPEECH_GAP_PAD_SECONDS
+            clip_start = max(0.0, gap_start - padding)
+            clip_end = min(len(audio) / 16000.0, gap_end + padding)
             clip = audio[int(clip_start * 16000):int(clip_end * 16000)]
-            local_segments, _info = model.transcribe(
-                clip,
+            trace = {"gap_start": gap_start, "gap_end": gap_end, "clip_start": clip_start,
+                     "clip_end": clip_end, "segments": []}
+            debug["decode_windows"].append(trace)
+            decode_options = dict(
                 language=language if language else None,
                 beam_size=5,
                 patience=1.2,
@@ -1536,14 +1573,35 @@ def recover_uncovered_speech(model, video_path, raw_segments, raw_words, languag
                 word_timestamps=True,
                 condition_on_previous_text=False,
                 initial_prompt=None,
-                hotwords=recovery_hotwords,
+                hotwords=None if whole_word_gap else recovery_hotwords,
                 temperature=0.0,
                 compression_ratio_threshold=WHISPER_COMPRESSION_RATIO_THRESHOLD,
                 log_prob_threshold=-1.0,
                 no_speech_threshold=0.6,
             )
+            if whole_word_gap:
+                allowed = lambda text: (not pathological_repeated_phrase(text)
+                    and (count_context or not implausible_count_sequence(text))
+                    and not looks_like_prompt_echo(text, video_title))
+                local_segments, clip_start, retry_trace = decode_gap(
+                    model, audio, gap_start, gap_end, decode_options, allowed)
+                trace["context_retry"] = retry_trace
+                trace["clip_start"] = clip_start
+                trace["clip_end"] = retry_trace["attempts"][retry_trace["selected_attempt"]]["clip_end"]
+            else:
+                local_segments, _info = model.transcribe(clip, **decode_options)
+            saw_segment = False
             for local_segment in local_segments:
+                saw_segment = True
                 text = " ".join(local_segment.text.strip().split())
+                trace["segments"].append({"text": text,
+                    "start": clip_start + float(local_segment.start),
+                    "end": clip_start + float(local_segment.end),
+                    "avg_logprob": getattr(local_segment, "avg_logprob", None),
+                    "no_speech_prob": getattr(local_segment, "no_speech_prob", None),
+                    "words": [{"text": w.word.strip(), "start": clip_start + float(w.start),
+                               "end": clip_start + float(w.end), "probability": getattr(w, "probability", None)}
+                              for w in getattr(local_segment, "words", None) or []]})
                 repeated_recovery = pathological_repeated_phrase(text)
                 bad_count_recovery = not count_context and implausible_count_sequence(text)
                 if repeated_recovery or bad_count_recovery:
@@ -1569,6 +1627,9 @@ def recover_uncovered_speech(model, video_path, raw_segments, raw_words, languag
                 token_count = len(re.findall(r"[A-Za-z0-9']+", text))
                 short_utterance = token_count <= 4 and avg_logprob >= -0.6 and no_speech_prob <= 0.75
                 if avg_logprob < -0.8 or no_speech_prob > 0.75 or (mean_probability < 0.30 and not short_utterance):
+                    debug["rejected_candidates"].append({"start": gap_start, "end": gap_end,
+                        "text": text, "reason": "confidence_gate", "avg_logprob": avg_logprob,
+                        "no_speech_prob": no_speech_prob, "mean_word_probability": mean_probability})
                     continue
                 segment_words = []
                 for word in local_words:
@@ -1586,8 +1647,12 @@ def recover_uncovered_speech(model, video_path, raw_segments, raw_words, languag
                         "text": word_text,
                         "probability": float(word.probability) if getattr(word, "probability", None) is not None else None,
                         "recovered": True,
+                        "recovery_stage": "post_alignment" if whole_word_gap else "pre_alignment",
+                        "recovery_review_required": bool(whole_word_gap and retry_trace["retry_selected"]),
                     })
                 if not segment_words:
+                    debug["rejected_candidates"].append({"start": gap_start, "end": gap_end,
+                        "text": text, "reason": "no_words_inside_uncovered_range"})
                     continue
                 preserve_segment_terminal_punctuation(segment_words, 0, text)
                 recovered_words.extend(segment_words)
@@ -1612,10 +1677,13 @@ def recover_uncovered_speech(model, video_path, raw_segments, raw_words, languag
                     "avg_logprob": avg_logprob,
                     "mean_word_probability": mean_probability,
                 })
+            if not saw_segment:
+                debug["empty_windows"].append({"start": gap_start, "end": gap_end})
         if recovered_words:
             raw_segments = list(raw_segments) + recovered_segments
             raw_words = list(raw_words) + recovered_words
-            raw_segments, raw_words = rebuild_raw_transcription_artifacts(raw_segments, raw_words)
+            raw_segments, raw_words = rebuild_raw_transcription_artifacts(raw_segments, raw_words,
+                                                                          deduplicate=not whole_word_gap)
         remaining = find_uncovered_speech_gaps(raw_words, speech_ranges, audio_duration)
         debug["remaining_candidates"] = [{"start": start, "end": end} for start, end in remaining]
     except Exception as exc:
@@ -1727,20 +1795,49 @@ def cache_revision_is_current(audio_hash):
     if not audio_hash:
         return False
     metadata = JOB_STORE.load_artifact(audio_hash, "pipeline.json", {})
-    return isinstance(metadata, dict) and metadata.get("revision") == PIPELINE_REVISION
+    return (isinstance(metadata, dict) and metadata.get("revision") == PIPELINE_REVISION
+            and metadata.get("caption_experiments", {}) == caption_experiment_config())
+
+
+def caption_experiment_config():
+    config = {name: True for name in ("SUBTITLE_LEARNING_SENTENCES_EXPERIMENT",
+                                    "WHISPERX_QUALITY_GUARD_EXPERIMENT",
+                                    "SUBTITLE_POST_ALIGNMENT_RECOVERY_EXPERIMENT") if env_enabled(name, False)}
+    if TRANSLATION_STYLE != "subtitle":
+        config["translation_style"] = TRANSLATION_STYLE
+    if os.environ.get("TRANSLATION_CONTEXT_MODE", "off").lower() == "auto":
+        config["context_translation"] = {"policy": "local-context-v1",
+            "model": os.environ.get("CONTEXT_TRANSLATION_MODEL", "qwen3.5:4b-q4_K_M")}
+    if config.get("SUBTITLE_POST_ALIGNMENT_RECOVERY_EXPERIMENT"):
+        config["recovery_policy"] = "bounded-context-consensus-v1"
+    if config.get("WHISPERX_QUALITY_GUARD_EXPERIMENT"):
+        config["alignment_policy"] = "bounded-source-disagreement-v4"
+    if config.get("SUBTITLE_LEARNING_SENTENCES_EXPERIMENT"):
+        config["learning_policy"] = "bounded-gap-learning-v3"
+    return config
 
 
 def save_pipeline_revision(audio_hash):
     save_artifact(
         audio_hash,
         "pipeline.json",
-        {"revision": PIPELINE_REVISION, "service_version": SERVICE_VERSION},
+        {"revision": PIPELINE_REVISION, "service_version": SERVICE_VERSION,
+         "caption_experiments": caption_experiment_config()},
     )
 
 
 def finalize_english_segments(segments, video_title=""):
     return add_sentence_timing_padding(correct_recognized_captions(segments, video_title))
 
+def serialized_inference(function):
+    @functools.wraps(function)
+    def wrapped(*args, **kwargs):
+        with _job_execution_lock:
+            return function(*args, **kwargs)
+    return wrapped
+
+
+@serialized_inference
 def transcribe(
     video_path,
     progress=None,
@@ -1828,6 +1925,8 @@ def transcribe(
                     "translation": "",
                 }
             )
+    save_artifact(artifact_audio_hash, "asr_first_pass_segments.json", raw_segments)
+    save_artifact(artifact_audio_hash, "asr_first_pass_words.json", raw_words)
     raw_segments, raw_words, rejected_first_pass = discard_unreliable_first_pass_segments(
         raw_segments, raw_words
     )
@@ -1840,10 +1939,12 @@ def transcribe(
         model, video_path, raw_segments, raw_words, language, video_title, progress
     )
     gap_debug["full_audio_count_recovery"] = count_debug
+    save_artifact(artifact_audio_hash, "pre_alignment_segments.json", raw_segments)
+    save_artifact(artifact_audio_hash, "pre_alignment_words.json", raw_words)
     report(progress, "postprocessing", 88, "Aligning words with WhisperX")
     try:
         raw_segments, raw_words, alignment_debug = run_whisperx_alignment(
-            video_path, raw_segments, language
+            video_path, raw_segments, language, raw_words
         )
     except Exception as exc:
         alignment_debug = {
@@ -1857,6 +1958,34 @@ def transcribe(
         print(f"WhisperX alignment failed; retaining Whisper timestamps: {exc}", flush=True)
     save_artifact(artifact_audio_hash, "whisperx_alignment.json", alignment_debug)
     gap_debug["whisperx_alignment"] = alignment_debug
+    if env_enabled("SUBTITLE_POST_ALIGNMENT_RECOVERY_EXPERIMENT", False):
+        if not env_enabled("WHISPERX_QUALITY_GUARD_EXPERIMENT", False):
+            raise RuntimeError("Post-alignment recovery experiment requires lossless alignment guard")
+        save_artifact(artifact_audio_hash, "aligned_before_recovery_words.json", raw_words)
+        raw_segments, raw_words, post_recovery = recover_uncovered_speech(
+            model, video_path, raw_segments, raw_words, language, video_title, progress,
+            whole_word_gap=True)
+        if post_recovery.get("error"):
+            save_artifact(artifact_audio_hash, "post_alignment_recovery.json", post_recovery)
+            raise RuntimeError(post_recovery["error"])
+        if post_recovery.get("recovered"):
+            save_artifact(artifact_audio_hash, "post_recovery_pre_alignment_segments.json", raw_segments)
+            save_artifact(artifact_audio_hash, "post_recovery_pre_alignment_words.json", raw_words)
+            raw_segments, raw_words, second_alignment = run_whisperx_alignment(
+                video_path, raw_segments, language, raw_words)
+            post_recovery["second_alignment"] = second_alignment
+        # One bounded repair pass only; never recursively fill music/silence.
+        save_artifact(artifact_audio_hash, "post_alignment_recovery.json", post_recovery)
+        gap_debug["post_alignment_recovery"] = post_recovery
+    # Forced alignment can shorten over-wide ASR word spans and reveal speech
+    # previously hidden from the BEFORE-alignment gap check. Keep this evidence
+    # even if a cautious repair policy cannot safely insert new words yet.
+    if "speech_ranges" in gap_debug:
+        gap_debug["uncovered_after_alignment"] = [
+            {"start": start, "end": end} for start, end in find_uncovered_speech_gaps(
+                raw_words, gap_debug["speech_ranges"], gap_debug.get("audio_duration"))
+        ]
+        gap_debug["post_alignment_review_required"] = bool(gap_debug["uncovered_after_alignment"])
     report(progress, "postprocessing", 89, "Post-processing WhisperX-aligned timing")
     save_artifact(artifact_audio_hash, "whisper_segments.json", raw_segments)
     save_artifact(artifact_audio_hash, "whisper_words.json", raw_words)
@@ -1888,9 +2017,11 @@ def transcribe(
                 "semantic_issues": semantic_issues,
                 "legacy_issues": legacy_issues,
             }
-            if semantic and semantic_penalty <= legacy_penalty:
+            learning_mode = semantic_segmenter_config().learning_sentence_mode
+            if semantic and (learning_mode or semantic_penalty <= legacy_penalty):
                 result = semantic
                 debug["used_fallback"] = False
+                debug["experimental_learning_sentences"] = learning_mode
             else:
                 result = legacy
                 debug["used_fallback"] = True
@@ -1945,6 +2076,10 @@ def correct_recognized_captions(segments, video_title=""):
 def correct_recognized_caption_text(text, video_title=""):
     text = " ".join((text or "").split())
     if not text:
+        return text
+    if env_enabled("SUBTITLE_LEARNING_SENTENCES_EXPERIMENT", False):
+        # Keep the token identities used by alignment and learning word ranges.
+        # Proper nouns and hesitations cannot be corrected from the title alone.
         return text
 
     replacements = [
@@ -2225,16 +2360,36 @@ def translate_segments(segments, language="en", progress=None):
         translations = translate_texts([segment["text"] for segment in segments], progress)
     except Exception as exc:
         print(f"Translation failed: {exc}. Returning English captions only.")
-        return segments
+        return [dict(segment, translation_status="failed") for segment in segments]
     if len(translations) != len(segments):
-        return segments
+        return [dict(segment, translation_status="failed") for segment in segments]
 
     translated = []
     for segment, translation in zip(segments, translations):
         item = dict(segment)
         item["translation"] = translation
+        item["translation_status"] = caption_translation_status(segment["text"], translation)
         translated.append(item)
+    for item, metadata in zip(translated, getattr(translations, "metadata", [])):
+        item.update(metadata)
     return translated
+
+
+def caption_translation_status(source, translation):
+    """Provenance / warning only; a generated translation is never verified accuracy."""
+    source = " ".join(str(source or "").split())
+    target = " ".join(str(translation or "").split())
+    if not target:
+        return "missing"
+    direct = deterministic_caption_translation(source)
+    if direct is not None and target == direct:
+        return "deterministic"
+    if target == source:
+        return "english_fallback"
+    if (translation_is_degenerate(source, target) or translation_is_incomplete(source, target)
+            or (re.search(r"[.!?]\s*$", source) and re.search(r"[,;:，；：]\s*$", target))):
+        return "review_required"
+    return "generated_unreviewed"
 
 
 NUMBER_WORD_VALUES = {
@@ -2288,6 +2443,10 @@ def translation_is_incomplete(source, translation):
     text = " ".join(str(translation or "").split())
     if not source or not text:
         return bool(source)
+    # ASR often omits the final period. A target ending in an open comma is
+    # still suspicious unless the source explicitly carries a continuation.
+    if not re.search(r"[,;:，；：]\s*$", source) and re.search(r"[,;:，；：]\s*$", text):
+        return True
     source_words = re.findall(r"[A-Za-z0-9]+(?:['?-][A-Za-z0-9]+)*", source)
     if len(source_words) < 8:
         return False
@@ -2325,7 +2484,44 @@ def safe_caption_translation(source, prepared, translation):
     return polished
 
 
+class TranslationResults(list):
+    def __init__(self, rows):
+        super().__init__(row["translation"] for row in rows)
+        self.metadata = rows
+
+
+@serialized_inference
 def translate_texts(texts, progress=None):
+    global _context_translator
+    if (not texts or TRANSLATION_PROVIDER in ("", "none", "off") or
+            os.environ.get("TRANSLATION_CONTEXT_MODE", "off").lower() != "auto"):
+        return _translate_texts_legacy(texts, progress)
+    try:
+        if _context_translator is None:
+            _context_translator = LocalContextTranslator(SERVICE_DATA_DIR)
+        def report(done, total):
+            message = f"Local contextual Chinese translation {done}/{total}"
+            percent = 92 + int(7 * done / max(1, total))
+            write_runtime_status(stage="translating", progress=percent, message=message,
+                translation_provider="local_context", translation_model=_context_translator.model,
+                translation_total=total, translation_done=done)
+            if progress:
+                progress("translating", percent, message)
+        rows = _context_translator.translate(texts, deterministic_caption_translation,
+            lambda values: _translate_texts_legacy(values), caption_translation_status,
+            lambda: release_idle_models(force=True), report)
+        print(f"Context translation completed: {len(rows)} units; "
+              f"statuses={dict(collections.Counter(row['translation_status'] for row in rows))}", flush=True)
+        return TranslationResults(rows)
+    except Exception as exc:
+        print(f"Local context unavailable ({type(exc).__name__}); using existing translation backend.", flush=True)
+        write_runtime_status(translation_context_fallback=type(exc).__name__)
+        if _context_translator is not None:
+            _context_translator.close()
+        return _translate_texts_legacy(texts, progress)
+
+
+def _translate_texts_legacy(texts, progress=None):
     if not texts or TRANSLATION_PROVIDER in ("", "none", "off"):
         return ["" for _ in texts]
 
@@ -2410,6 +2606,9 @@ def normalize_english_numeric_phrases(text):
 
 
 def prepare_caption_for_translation(text):
+    if TRANSLATION_STYLE == "generic":
+        # No scene-specific corrections, phrase expansions, or assumed acronyms.
+        return " ".join(str(text or "").split())
     text = " ".join(normalize_english_numeric_phrases(text).split())
     if TRANSLATION_STYLE in ("", "raw", "none", "off"):
         return text
@@ -2435,6 +2634,8 @@ def prepare_caption_for_translation(text):
 
 def polish_caption_translation(original, prepared, translation):
     text = " ".join((translation or "").split())
+    if TRANSLATION_STYLE == "generic":
+        return format_chinese_punctuation(text)
     if TRANSLATION_STYLE in ("", "raw", "none", "off"):
         return text
 
@@ -2541,6 +2742,12 @@ def normalize_subtitle_chinese(text):
     for old, new in replacements:
         text = text.replace(old, new)
     text = re.sub(r"(?<!\u9632)\u718a\u55b7\u96fe", "\u9632\u718a\u55b7\u96fe", text)
+    return format_chinese_punctuation(text)
+
+
+def format_chinese_punctuation(text):
+    """Presentation only; never replace words or infer the video's subject."""
+    text = " ".join(str(text or "").split())
     if re.search(r"[\u3400-\u9fff]", text):
         text = re.sub(r",\s*", "\uff0c", text)
         text = re.sub(r"\.(?=$|\s)", "\u3002", text)
@@ -2563,6 +2770,7 @@ def get_translator():
         return _translator
 
 
+@serialized_inference
 def release_idle_models(force=False, now=None):
     """Unload resident ASR/translation weights after a configurable warm period."""
     global _translator, _models_last_used_at
@@ -2683,7 +2891,8 @@ def build_transformers_translator():
         length_penalty=1.35,
         early_stopping=False,
     ):
-        encoded = tokenizer(texts, return_tensors="pt", padding=True, truncation=True, max_length=512)
+        # Length is checked before batching; never silently translate a prefix.
+        encoded = tokenizer(texts, return_tensors="pt", padding=True, truncation=False)
         encoded = {name: tensor.to(device) for name, tensor in encoded.items()}
         token_limit = max_new_tokens or 256
         generation_options = {
@@ -2699,6 +2908,17 @@ def build_transformers_translator():
         return [text.strip() for text in tokenizer.batch_decode(generated, skip_special_tokens=True)]
 
     def translate_batch(texts):
+        lengths = [len(ids) for ids in tokenizer(texts, truncation=False, add_special_tokens=True)["input_ids"]]
+        allowed = [i for i, length in enumerate(lengths) if length <= 512]
+        if len(allowed) != len(texts):
+            # Oversize text remains visible as explicit English fallback, not a
+            # plausible but incomplete Chinese caption. Other inputs still run.
+            result = list(texts)
+            if allowed:
+                translated = translate_batch([texts[i] for i in allowed])
+                for i, translation in zip(allowed, translated):
+                    result[i] = translation
+            return result
         translations = generate_translations(texts)
         for index, (source, translation) in enumerate(zip(texts, translations)):
             is_bad = translation_is_degenerate(source, translation)
@@ -2706,7 +2926,9 @@ def build_transformers_translator():
             if not is_bad and not is_incomplete:
                 continue
             retry = generate_translations(
-                [source],
+                # Retry punctuation-free ASR units with a terminal marker.
+                # No words are added and fallback always preserves the source.
+                [source if re.search(r"[.!?,;:]\s*$", source) else source + "."],
                 num_beams=5,
                 max_new_tokens=256,
                 length_penalty=1.50,
@@ -3159,6 +3381,7 @@ def add_sentence_timing_padding(segments):
 
         adjusted.append(
             {
+                **segment,
                 "start": start,
                 "end": max(padded_end, start + 0.2),
                 "text": segment["text"],

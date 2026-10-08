@@ -70,6 +70,16 @@ def audit(cache_root, audio_hash):
                 "detail": issue["detail"],
                 "text": str(segment.get("text", ""))[:300],
             })
+    final_path = cache_root / audio_hash / "english.json"
+    final_issues = None
+    if final_path.is_file():
+        with final_path.open("r", encoding="utf-8-sig") as handle:
+            final_segments = json.load(handle)
+        final_issues = [
+            {"index": index, **issue}
+            for index, segment in enumerate(final_segments)
+            if (issue := describe_issue(service, segment)) is not None
+        ]
     return {
         "audio_hash": audio_hash,
         "segment_count": len(segments),
@@ -78,7 +88,10 @@ def audit(cache_root, audio_hash):
             default=0.0,
         ),
         "issues_before_quality_gates": issues,
-        "issues_after_quality_gates": 0,
+        "issues_after_quality_gates": len(final_issues) if final_issues is not None else None,
+        "final_caption_issues": final_issues,
+        "reference_timing_evaluated": False,
+        "translation_evaluated": False,
     }
 
 

@@ -28,7 +28,21 @@ class ModelRuntimeTests(unittest.TestCase):
 
     def test_project_local_nllb_is_the_default(self):
         expected = str(PROJECT_ROOT / "models" / "nllb-200-distilled-600M")
-        self.assertEqual(os.path.normcase(os.path.abspath(self.service.DEFAULT_TRANSLATION_MODEL)), os.path.normcase(expected))
+        # Unit tests must not require several GB of untracked model downloads.
+        original_isfile = os.path.isfile
+        config = os.path.normcase(os.path.join(expected, "config.json"))
+        with mock.patch("os.path.isfile", side_effect=lambda p: os.path.normcase(str(p)) == config or original_isfile(p)):
+            service = load_service()
+        self.assertEqual(os.path.normcase(os.path.abspath(service.DEFAULT_TRANSLATION_MODEL)), os.path.normcase(expected))
+
+    def test_missing_models_use_named_fallbacks(self):
+        original_isfile = os.path.isfile
+        config = os.path.normcase(str(PROJECT_ROOT / "models" / "nllb-200-distilled-600M" / "config.json"))
+        with mock.patch("os.path.isfile", side_effect=lambda p: False if os.path.normcase(str(p)) == config else original_isfile(p)):
+            service = load_service()
+        self.assertEqual(service.DEFAULT_TRANSLATION_MODEL, "facebook/nllb-200-distilled-600M")
+        with mock.patch.object(service, "model_dir_exists", return_value=False), mock.patch.dict(os.environ, {"WHISPER_ENGLISH_MODEL": "large-v3"}):
+            self.assertEqual(service.choose_transcription_model("en"), "large-v3")
 
     def test_translation_auto_device_selects_cuda(self):
         torch_module = types.SimpleNamespace(cuda=types.SimpleNamespace(is_available=lambda: True))
@@ -45,12 +59,15 @@ class ModelRuntimeTests(unittest.TestCase):
 
     def test_large_v3_auto_compute_uses_int8_float16(self):
         model = str(PROJECT_ROOT / "models" / "faster-whisper-large-v3")
-        self.assertEqual(self.service.resolve_whisper_compute_type("auto", "cuda", model), "int8_float16")
+        original_exists = os.path.exists
+        with mock.patch("os.path.exists", side_effect=lambda p: str(p) == model or original_exists(p)):
+            self.assertEqual(self.service.resolve_whisper_compute_type("auto", "cuda", model), "int8_float16")
         self.assertEqual(self.service.resolve_whisper_compute_type("auto", "cpu", model), "int8")
 
     def test_large_v3_is_the_default_english_model(self):
         expected = str(PROJECT_ROOT / "models" / "faster-whisper-large-v3")
-        with mock.patch.dict(os.environ, {"WHISPER_ENGLISH_MODEL": "large-v3"}):
+        with mock.patch.dict(os.environ, {"WHISPER_ENGLISH_MODEL": "large-v3"}), \
+             mock.patch.object(self.service, "model_dir_exists", side_effect=lambda p: os.path.normcase(str(p)) == os.path.normcase(expected)):
             selected = self.service.choose_transcription_model("en")
         self.assertEqual(os.path.normcase(os.path.abspath(selected)), os.path.normcase(expected))
 

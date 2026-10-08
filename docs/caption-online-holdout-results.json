@@ -1,0 +1,339 @@
+{
+  "scope": "six_new_complete_publisher_hardcaption_videos",
+  "candidate_policy": {
+    "created_utc": "2026-10-07T08:47:43.567365+00:00",
+    "sources": {
+      "tools\\versions\\v2.1.0\\acoustic_chunks.py": "58c669a556b6cf0ceb500c8a003af9883e5fa21e98cd691d1525ed32d71eb53d",
+      "tools\\versions\\v2.1.0\\alignment_quality.py": "54ba7aea7e89fe3ee14c63bf4f9f29bd5daf4f5bee6c93711dfa7e1bb57ac579",
+      "tools\\versions\\v2.1.0\\durable_job_store.py": "c4b97393c8da53269963ba2f625b54b83204dde36f485edee716b3a6a82c7128",
+      "tools\\versions\\v2.1.0\\guarded_alignment.py": "08b8e97766beca0834a5a267622b30c8cfe2503739b8296b508986989a65342e",
+      "tools\\versions\\v2.1.0\\recovery_decode.py": "f8482a3979b68a96e31664430477e434761a23381f8e5be25ba24ba4a5e08a17",
+      "tools\\versions\\v2.1.0\\semantic_caption_segmenter_v206.py": "eb3cff72dc9fadf2a1c08188b3a24236ed97d828ec13ebaaff5d1adda1a0cb1e",
+      "tools\\versions\\v2.1.0\\semantic_worker.py": "0add484aa065a978e7c6a58e3de2987d40417dd6b0e7950ff1754df44f7cb217",
+      "tools\\versions\\v2.1.0\\service.py": "6f3152172e7d0d575cfadfd6f5e440b71ca45444d07a00c0c9e875aae758941e",
+      "tools\\versions\\v2.1.0\\speech_coverage.py": "7effc154373d072127278ec408c8a7415b69a50d8a2e6772b052e8c2ff8adad2",
+      "tools\\versions\\v2.1.0\\whisperx_worker.py": "af724173cdfd64cf7bdde7c862fe89532d5b8a704201a54d77c2ddd99eaa8b0c",
+      "tools\\versions\\v2.1.0\\windowed_asr.py": "24b4a90ca3fde4bfca8a1756497369dfbc26e5ca6116bd64f6115c74b47d5365",
+      "tools\\validation\\audit_cached_timeline_quality.py": "cd954e5578f749b761de4723719c9920651d8f3b24a5e4ceb926ec01f8fbd358",
+      "tools\\validation\\audit_full_audio_speech_coverage.py": "ba8cd69c2f3024246016fe5427afb5581d311b3f1491579e4ea1b34ac49aa235",
+      "tools\\validation\\audit_ocr_timeline.py": "870b460c6653fd13f36b76ab8d2c8b05fbc84004a2daaf6475ca08a3e07f7fd8",
+      "tools\\validation\\audit_pipeline_integrity.py": "bd507beb4464a36649797f21b779bde5e889ce9c57e52e63908051bb9b83dc26",
+      "tools\\validation\\audit_stereo_mix.py": "2f2a9a0038a38cbd4046267f59bc4ee9209031dd30d82737e18a05b1cb3b5abf",
+      "tools\\validation\\audit_transcript_drift.py": "f5187091f11494b6acf66b2368be06c657cfe86983f2728795f85115ea745532",
+      "tools\\validation\\audit_translation_outputs.py": "fb90ec68022ea1cd703cd900cd787ee748864310c86e50f87780639eff0442ea",
+      "tools\\validation\\compare_full_transcript_candidates.py": "7ba622c7cec1f6d44a3882ab84a3620928cd0f6868a9f44980ed6f6fb1f0c389",
+      "tools\\validation\\compare_ocr_proposals.py": "e0708467bb2fc6411b44688ddcd014737e72f603094a82247cb25c78c44ac595",
+      "tools\\validation\\cross_model_gap_consensus.py": "51e80b840e327e2a874dc5634e75c674df7dc10758ded888f02902d3958748a1",
+      "tools\\validation\\evaluate_caption_reference.py": "854d07815d64b6891042a5b809da4ed678e215b6d4a37c9bc7be9f8b93b4371b",
+      "tools\\validation\\expand_gap_probe_inventory.py": "f95a95eb0d715b1716043c3feeac4d3c033a5c0711ec2177b052ee38c20a2d71",
+      "tools\\validation\\extract_burned_subtitles.py": "a9e5262cd8bc661137d3268e13e36b0009c130603772fca1031b8fcef3d7045e",
+      "tools\\validation\\prepare_online_holdout.py": "0f9c00e93c89791cc2c789df001aec2188eec7fe71f688714d5727053ff521e6",
+      "tools\\validation\\recover_post_alignment_gaps.py": "b0d0cab3e9400233b8ed3b840b30683ac39e164d0ab4d5f6b4c54bfb56c094c8",
+      "tools\\validation\\render_reference_review.py": "1d16fa0dba0f37c58e09a1d9976a32905d092ef30eb43360af8b2bf328c26561",
+      "tools\\validation\\replay_alignment_order.py": "4ad68aa3ce104f6548cca3258c6a5514ee568371908b0d63378eda87dfba095a",
+      "tools\\validation\\replay_learning_threshold.py": "1794b1357fae516052ed8932307e69f673ed6fcf3d64017159f03df82d9d0622",
+      "tools\\validation\\run_cached_sentence_experiment.py": "03d3e1abfd0ef6f5a139270d29a673378eb42ea5cb6fa3a7d2f04ee5bcdeb6cb",
+      "tools\\validation\\run_caption_pipeline_experiment.py": "fb9700636f18cf34dc453ed1bbba05362db7add2c7ba2ad75198e6cebb0b50bf",
+      "tools\\validation\\run_cohort_learning_experiment.py": "eb5e25412d33f6aa703f6652371f3efcaaa35efbbac8ef0433a6010049861ca8",
+      "tools\\validation\\run_full_audio_alignment_experiment.py": "c3773ef8a23e1f3e12499e77b7780dd1ca911403e6dc107716768885bdaa59c7",
+      "tools\\validation\\run_full_audio_asr_comparison.py": "9ca1fe7f25212688143bad81b4c4aeb8bbc59e53f9ee42de8641421c41426c24",
+      "tools\\validation\\run_independent_gap_probe.py": "6ae88144c85724d98411acb273143e6aef1a7be25eeb5f02bba81b20d3da4169",
+      "tools\\validation\\run_online_holdout.py": "a1f5d393e10f2dca68427dd02532d3db02045e7820522f7b298bb3824d3fad60",
+      "tools\\validation\\run_parakeet_asr_experiment.py": "6ff6157d1877135fb072b649509c063f08497ba2078e44297d6a4a45c831ebc2",
+      "tools\\validation\\run_service_recovery_experiment.py": "9d0096585f920b73d4ac539396996ff505393bb4a82d5512ad589b643457aaac",
+      "tools\\validation\\run_whisperx_asr_experiment.py": "96940857a788e6f9c92e69b41640d5ba164021986481aff78f9eef4f737c0656",
+      "tools\\validation\\run_windowed_asr_experiment.py": "2b02bb72d3b272b9c588823b2ad642ad15f982cc55e819e93cc04e2544edcaa8",
+      "tools\\validation\\summarize_full_cohort.py": "7827900a84301f36bbfd32dc1c5e6e43e6a4a2052b30fd6af1ef9990120acef5",
+      "tools\\validation\\summarize_sentence_experiment.py": "f0e3d380ffd9cc1269915484294940a01f15cc704e48fc2f32a7ac7540660843",
+      "tools\\validation\\validate_full_audio_recovery.py": "fc01d712738de8a456c5d0ab5707d8f80c11814d56ebfa2ef09c79a371413533",
+      "tools\\validation\\validate_idle_model_memory.py": "1d0ef397ab3d9ccbcf836fe83e67b3893d45256249b2d6c636787938b0766fbe",
+      "tools\\validation\\verify_cached_audio_identity.py": "e45abe40192c8c27813da274d69c94c1b34bdc7a453847dc29549bd46c4813c7"
+    },
+    "manifest_sha256": "36cc2f4901530992cb2a6d5fbbff9659622b7d39a49349f7572d3eb89c18aab2",
+    "threshold": 0.25,
+    "soft_dependencies": true,
+    "asr_core_seconds": 20,
+    "asr_context_seconds": 4,
+    "alignment_policy": "bounded-source-disagreement-v4",
+    "reference_used_as_prompt": false,
+    "preexisting_tuning_videos": false,
+    "reserve_excluded": [
+      "new_budget"
+    ],
+    "release_allowed": false
+  },
+  "results": [
+    {
+      "name": "new_interview",
+      "title": "The Interview",
+      "source_url": "https://learningenglish.voanews.com/a/lets-learn-english-level-2-lesson-2/3960471.html",
+      "video_sha256": "127b37412b8a47d97739e8aff2a0afadf23f88821583dba4f4bed83f1dbc46f1",
+      "audio_sha256": "9b2a4db7eaeff76884ac77fa3b8814540d7617e78c480420f73ed41465d66057",
+      "duration_seconds": 300.36,
+      "complete_audio_candidate_and_baseline_executed": true,
+      "complete_video_ocr_executed": true,
+      "ocr_sampled_frames": 578,
+      "decoded_video_frames": 7509,
+      "video_decode_errors": 0,
+      "candidate_input_words": 481,
+      "baseline_input_words": 480,
+      "candidate_learning_units": 71,
+      "baseline_learning_units_same_input": 67,
+      "candidate_units_over_40_words": 0,
+      "baseline_units_over_40_words_same_input": 0,
+      "translation_status_counts": {
+        "generated_unreviewed": 70,
+        "english_fallback": 1
+      },
+      "integrity_passed": true,
+      "ocr_word_recall_not_accuracy": 0.8589981447124304,
+      "baseline_ocr_word_recall_not_accuracy": 0.8534322820037106,
+      "ocr_anchor_counts": {
+        "no_exact_match": 22,
+        "insufficient_text": 23,
+        "anchor_found": 40,
+        "ambiguous_repetition": 2
+      },
+      "publisher_transcript_comparison": []
+    },
+    {
+      "name": "new_perspectives",
+      "title": "He Said - She Said",
+      "source_url": "https://learningenglish.voanews.com/a/lets-learn-english-level-2-lesson-3/4027340.html",
+      "video_sha256": "d1e9ebebc8e8b9b9be3987bca2da6acb702bc75faa305b68607852fee28abda6",
+      "audio_sha256": "ff99887435730bd527254db9a69eeaab6a327cfa6791a8c9953340ebc7ecad00",
+      "duration_seconds": 300.4,
+      "complete_audio_candidate_and_baseline_executed": true,
+      "complete_video_ocr_executed": true,
+      "ocr_sampled_frames": 578,
+      "decoded_video_frames": 7510,
+      "video_decode_errors": 0,
+      "candidate_input_words": 560,
+      "baseline_input_words": 558,
+      "candidate_learning_units": 83,
+      "baseline_learning_units_same_input": 75,
+      "candidate_units_over_40_words": 0,
+      "baseline_units_over_40_words_same_input": 0,
+      "translation_status_counts": {
+        "generated_unreviewed": 83
+      },
+      "integrity_passed": true,
+      "ocr_word_recall_not_accuracy": 0.9014084507042254,
+      "baseline_ocr_word_recall_not_accuracy": 0.8888888888888888,
+      "ocr_anchor_counts": {
+        "no_exact_match": 21,
+        "insufficient_text": 21,
+        "anchor_found": 36,
+        "ambiguous_repetition": 6
+      },
+      "publisher_transcript_comparison": []
+    },
+    {
+      "name": "new_illusion",
+      "title": "News Words: Illusion",
+      "source_url": "https://learningenglish.voanews.com/a/8007357.html",
+      "video_sha256": "f6347e1289ebedc4c83a6399efdd52eb8662830cc69aa301079fa31a8ba9033f",
+      "audio_sha256": "8386bce47cb73d1a2253531fca879f544f9cefdf70d0f4c44d1167f59d147d5a",
+      "duration_seconds": 60.04,
+      "complete_audio_candidate_and_baseline_executed": true,
+      "complete_video_ocr_executed": true,
+      "ocr_sampled_frames": 116,
+      "decoded_video_frames": 1501,
+      "video_decode_errors": 0,
+      "candidate_input_words": 99,
+      "baseline_input_words": 99,
+      "candidate_learning_units": 8,
+      "baseline_learning_units_same_input": 8,
+      "candidate_units_over_40_words": 0,
+      "baseline_units_over_40_words_same_input": 0,
+      "translation_status_counts": {
+        "generated_unreviewed": 7,
+        "english_fallback": 1
+      },
+      "integrity_passed": true,
+      "ocr_word_recall_not_accuracy": 0.82,
+      "baseline_ocr_word_recall_not_accuracy": 0.82,
+      "ocr_anchor_counts": {
+        "no_exact_match": 7,
+        "anchor_found": 11,
+        "insufficient_text": 3
+      },
+      "publisher_transcript_comparison": []
+    },
+    {
+      "name": "new_thirty_days",
+      "title": "Try something new for 30 days",
+      "source_url": "https://www.ted.com/talks/matt_cutts_try_something_new_for_30_days",
+      "video_sha256": "1ff69fd1c9a6cb9351f8defefcb84bcb0b4f1b6dc490832a5153f2e67bb06fd9",
+      "audio_sha256": "cab65c2c18d6f9af64654d77ec53ab63a58a89cd5d687fa3166a1ed1f3ba263a",
+      "duration_seconds": 204.010522,
+      "complete_audio_candidate_and_baseline_executed": true,
+      "complete_video_ocr_executed": true,
+      "ocr_sampled_frames": 408,
+      "decoded_video_frames": 4894,
+      "video_decode_errors": 0,
+      "candidate_input_words": 489,
+      "baseline_input_words": 490,
+      "candidate_learning_units": 36,
+      "baseline_learning_units_same_input": 36,
+      "candidate_units_over_40_words": 0,
+      "baseline_units_over_40_words_same_input": 0,
+      "translation_status_counts": {
+        "generated_unreviewed": 34,
+        "english_fallback": 2
+      },
+      "integrity_passed": true,
+      "ocr_word_recall_not_accuracy": 0.7892503536067893,
+      "baseline_ocr_word_recall_not_accuracy": 0.7892503536067893,
+      "ocr_anchor_counts": {
+        "no_exact_match": 39,
+        "anchor_found": 45,
+        "insufficient_text": 21,
+        "ambiguous_repetition": 1
+      },
+      "publisher_transcript_comparison": [
+        {
+          "reference_words": 480,
+          "edit_counts": {
+            "insert": 9,
+            "equal": 479,
+            "substitute": 1
+          },
+          "publisher_transcript_wer": 0.020833333333333332,
+          "method": "candidate"
+        },
+        {
+          "reference_words": 480,
+          "edit_counts": {
+            "insert": 10,
+            "equal": 479,
+            "substitute": 1
+          },
+          "publisher_transcript_wer": 0.022916666666666665,
+          "method": "baseline"
+        }
+      ]
+    },
+    {
+      "name": "new_movement",
+      "title": "How to start a movement",
+      "source_url": "https://www.ted.com/talks/derek_sivers_how_to_start_a_movement",
+      "video_sha256": "f9f1b391ecff5ef08394dee8b94b025963c60ab2b2761d19c6165182c4422b80",
+      "audio_sha256": "67d4300a3554cea9a0ebc7038aee4ecc9461ef632e757296d2662c1017c8ee3d",
+      "duration_seconds": 186.409796,
+      "complete_audio_candidate_and_baseline_executed": true,
+      "complete_video_ocr_executed": true,
+      "ocr_sampled_frames": 373,
+      "decoded_video_frames": 5592,
+      "video_decode_errors": 0,
+      "candidate_input_words": 482,
+      "baseline_input_words": 485,
+      "candidate_learning_units": 29,
+      "baseline_learning_units_same_input": 24,
+      "candidate_units_over_40_words": 2,
+      "baseline_units_over_40_words_same_input": 5,
+      "translation_status_counts": {
+        "generated_unreviewed": 29
+      },
+      "integrity_passed": true,
+      "ocr_word_recall_not_accuracy": 0.8920353982300885,
+      "baseline_ocr_word_recall_not_accuracy": 0.8938053097345132,
+      "ocr_anchor_counts": {
+        "no_exact_match": 16,
+        "anchor_found": 52,
+        "ambiguous_repetition": 3,
+        "insufficient_text": 7
+      },
+      "publisher_transcript_comparison": [
+        {
+          "reference_words": 470,
+          "edit_counts": {
+            "insert": 14,
+            "equal": 468,
+            "delete": 2
+          },
+          "publisher_transcript_wer": 0.03404255319148936,
+          "method": "candidate"
+        },
+        {
+          "reference_words": 470,
+          "edit_counts": {
+            "insert": 17,
+            "equal": 468,
+            "delete": 2
+          },
+          "publisher_transcript_wer": 0.04042553191489362,
+          "method": "baseline"
+        }
+      ]
+    },
+    {
+      "name": "new_champion",
+      "title": "Every kid needs a champion",
+      "source_url": "https://www.ted.com/talks/rita_pierson_every_kid_needs_a_champion",
+      "video_sha256": "1bd5cf5733cba7df06ccac9344a15d0200063b6d36375aaec4b501cb7d3841fe",
+      "audio_sha256": "c71903e54d8ec0e41230753a8f756c4045c7bd4c885deeae163ebcf738a5bbad",
+      "duration_seconds": 468.160726,
+      "complete_audio_candidate_and_baseline_executed": true,
+      "complete_video_ocr_executed": true,
+      "ocr_sampled_frames": 937,
+      "decoded_video_frames": 14044,
+      "video_decode_errors": 0,
+      "candidate_input_words": 1109,
+      "baseline_input_words": 1114,
+      "candidate_learning_units": 99,
+      "baseline_learning_units_same_input": 91,
+      "candidate_units_over_40_words": 3,
+      "baseline_units_over_40_words_same_input": 4,
+      "translation_status_counts": {
+        "generated_unreviewed": 96,
+        "english_fallback": 3
+      },
+      "integrity_passed": true,
+      "ocr_word_recall_not_accuracy": 0.9414758269720102,
+      "baseline_ocr_word_recall_not_accuracy": 0.9406276505513147,
+      "ocr_anchor_counts": {
+        "no_exact_match": 22,
+        "anchor_found": 126,
+        "insufficient_text": 13
+      },
+      "publisher_transcript_comparison": [
+        {
+          "reference_words": 1087,
+          "edit_counts": {
+            "equal": 1070,
+            "delete": 2,
+            "substitute": 15,
+            "insert": 24
+          },
+          "publisher_transcript_wer": 0.03771849126034959,
+          "method": "candidate"
+        },
+        {
+          "reference_words": 1087,
+          "edit_counts": {
+            "equal": 1069,
+            "substitute": 17,
+            "insert": 28,
+            "delete": 1
+          },
+          "publisher_transcript_wer": 0.04231830726770929,
+          "method": "baseline"
+        }
+      ]
+    }
+  ],
+  "total_duration_seconds": 1519.381044,
+  "total_ocr_sampled_frames": 2990,
+  "total_decoded_video_frames": 41050,
+  "total_words_conserved": 3220,
+  "total_learning_units": 326,
+  "total_translation_status_counts": {
+    "generated_unreviewed": 319,
+    "english_fallback": 7
+  },
+  "human_full_audio_review_complete": false,
+  "independent_accuracy_95_verified": false,
+  "candidate_release_allowed": false,
+  "production_files_changed": false
+}
