@@ -98,6 +98,7 @@ class LearningActivity : Activity() {
     private val handler = Handler(Looper.getMainLooper())
     private val subtitles = mutableListOf<SubtitleLine>()
     private var mediaPlayer: MediaPlayer? = null
+    private var mediaPlayerPrepared = false
     private var fullscreenPlayer: FullscreenPlayerLayout? = null
     private var configureLearningOrientation: (() -> Unit)? = null
     private var orientationBeforeFullscreen = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
@@ -111,6 +112,7 @@ class LearningActivity : Activity() {
     private var showCurrentTranslation = false
     private var loopSentence = false
     private var normalPlayback = false
+    private var navigationPlaysOnce = false
     private var subtitleOffsetMs = 0
     private var textToSpeech: TextToSpeech? = null
     private var textToSpeechReady = false
@@ -185,7 +187,7 @@ class LearningActivity : Activity() {
     private val seekBarProgressMax = 1000
     private val progressWatcher = object : Runnable {
         override fun run() {
-            val player = mediaPlayer
+            val player = mediaPlayer.takeIf { mediaPlayerPrepared }
             if (player?.isPlaying == true && normalPlayback) {
                 val currentMs = player.currentPosition
                 if (pauseAtVideoTrackEndIfNeeded(currentMs)) {
@@ -207,7 +209,7 @@ class LearningActivity : Activity() {
                 if (line != null && player.currentPosition >= playbackEndMs(selectedIndex, line)) {
                     if (playingWordbookExample) {
                         player.pause()
-                    } else if (loopSentence) {
+                    } else if (loopSentence && !navigationPlaysOnce) {
                         seekTo(startMs(line), playWhenReady = true)
                     } else {
                         player.pause()
@@ -570,6 +572,7 @@ class LearningActivity : Activity() {
         }
         loopButton = controlButton("单次") {
             loopSentence = !loopSentence
+            navigationPlaysOnce = false
             updateButtons()
         }
         currentTranslationButton = controlButton("翻译关") {
@@ -694,18 +697,7 @@ class LearningActivity : Activity() {
     }
 
     private fun toggleFullscreenPlayback() {
-        val player = mediaPlayer ?: return
-        // Unlike normal-page play, pausing here must not cancel an active sentence loop.
-        if (player.isPlaying) player.pause() else {
-            ensureVideoSurfaceBound()
-            hideVideoPreview()
-            val line = subtitles.getOrNull(selectedIndex)
-            if (line == null) normalPlayback = true
-            if (!normalPlayback && line != null && player.currentPosition >= playbackEndMs(selectedIndex, line)) {
-                seekTo(startMs(line), playWhenReady = true)
-            } else player.start()
-        }
-        updateButtons()
+        toggleNormalPlayback()
     }
 
     private fun withBottomNav(content: View): LinearLayout {
@@ -1568,10 +1560,13 @@ class LearningActivity : Activity() {
     }
 
     private fun toggleNormalPlayback() {
-        val player = mediaPlayer ?: return
+        val player = mediaPlayer?.takeIf { mediaPlayerPrepared } ?: return
+        // Play during a sentence preview means continue, not pause/replay that sentence.
+        val pause = player.isPlaying && normalPlayback
         normalPlayback = true
+        navigationPlaysOnce = false
         playingWordbookExample = false
-        if (player.isPlaying) {
+        if (pause) {
             player.pause()
             statusText.text = "已暂停。"
         } else {
@@ -1590,6 +1585,7 @@ class LearningActivity : Activity() {
     private fun playLine(index: Int) {
         val line = subtitles.getOrNull(index) ?: return
         normalPlayback = false
+        navigationPlaysOnce = false
         selectedIndex = index
         renderSubtitles()
         scrollToSelected()
@@ -1616,6 +1612,7 @@ class LearningActivity : Activity() {
         val next = subtitleNavigationTarget(intervals, currentMs, delta)
         if (next < 0) return
         playLine(next)
+        navigationPlaysOnce = true
     }
 
     private fun updateButtons() {
@@ -1665,7 +1662,7 @@ class LearningActivity : Activity() {
     }
 
     private fun updateCurrentCaption() {
-        inlinePlayerControls?.updatePlayback(mediaPlayer?.isPlaying == true)
+        inlinePlayerControls?.updatePlayback(mediaPlayer?.isPlaying == true, normalPlayback)
         val line = subtitles.getOrNull(selectedIndex)
         val text = line?.currentCaptionText(showCurrentTranslation)
         if (line == null) {
@@ -1681,16 +1678,16 @@ class LearningActivity : Activity() {
             if (layout.caption.text.toString() != text.orEmpty()) {
                 layout.updateCaption(text?.let { clickableCaption(it, android.graphics.Color.WHITE) })
             }
-            val player = mediaPlayer
+            val player = mediaPlayer.takeIf { mediaPlayerPrepared }
             layout.updatePlayback(player?.isPlaying == true,
                 runCatching { player?.currentPosition ?: 0 }.getOrDefault(0),
-                runCatching { player?.duration ?: 0 }.getOrDefault(0))
+                runCatching { player?.duration ?: 0 }.getOrDefault(0), normalPlayback)
         }
     }
 
     private fun updatePlaybackSeekBar() {
         if (!::playbackSeekBar.isInitialized || isUserSeeking) return
-        val player = mediaPlayer ?: run {
+        val player = mediaPlayer?.takeIf { mediaPlayerPrepared } ?: run {
             playbackSeekBar.progress = 0
             return
         }
@@ -3828,6 +3825,7 @@ class LearningActivity : Activity() {
         playWhenReadyAfterPrepare: Boolean = false
     ) {
         val surface = videoSurface ?: return
+        mediaPlayerPrepared = false
         mediaPlayer?.release()
         mediaPlayer = MediaPlayer().apply {
             setSurface(surface)
@@ -3836,6 +3834,8 @@ class LearningActivity : Activity() {
                 fitVideoInsideView(width, height)
             }
             setOnPreparedListener {
+                if (it !== mediaPlayer) return@setOnPreparedListener
+                mediaPlayerPrepared = true
                 fitVideoInsideView(videoWidth, videoHeight)
                 statusText.text = videoTrackWarningMessage() ?: message
                 val pendingExample = pendingWordbookExample
@@ -3866,6 +3866,7 @@ class LearningActivity : Activity() {
                 }
             }
             setOnErrorListener { _, _, _ ->
+                mediaPlayerPrepared = false
                 statusText.text = "Could not open this video."
                 true
             }
@@ -3874,6 +3875,7 @@ class LearningActivity : Activity() {
     }
 
     private fun resetVideoOutput() {
+        mediaPlayerPrepared = false
         runCatching {
             mediaPlayer?.release()
         }
@@ -3996,7 +3998,7 @@ class LearningActivity : Activity() {
     }
 
     private fun seekTo(positionMs: Int, playWhenReady: Boolean = false) {
-        val player = mediaPlayer ?: return
+        val player = mediaPlayer?.takeIf { mediaPlayerPrepared } ?: return
         ensureVideoSurfaceBound()
         val safePosition = positionMs.coerceAtLeast(0)
         pendingStartAfterSeek = playWhenReady

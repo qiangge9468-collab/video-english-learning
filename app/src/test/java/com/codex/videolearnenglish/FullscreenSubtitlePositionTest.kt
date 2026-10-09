@@ -5,7 +5,7 @@ import org.junit.Test
 
 class FullscreenSubtitlePositionTest {
     @Test fun defaultIsCenteredNearBottom() {
-        assertEquals(400 to 344, FullscreenSubtitlePosition().pixels(800, 400))
+        assertEquals(400 to 288, FullscreenSubtitlePosition().pixels(800, 400))
     }
     @Test fun dragCannotCrossSafeArea() {
         assertEquals(0 to 400, FullscreenSubtitlePosition.fromPixels(-50f, 500f, 800, 400).pixels(800, 400))

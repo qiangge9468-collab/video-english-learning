@@ -41,17 +41,21 @@ class FullscreenInstrumentation : Instrumentation() {
         val deadline = SystemClock.uptimeMillis() + 12000
         while (SystemClock.uptimeMillis() < deadline) {
             var ok = false
-            ui { ok = runCatching(condition).getOrDefault(false) }
+            // Never query duration/position during MediaPlayer.prepareAsync: native
+            // errors there are asynchronous and are not caught by runCatching.
+            ui { ok = field("mediaPlayerPrepared") == true && runCatching(condition).getOrDefault(false) }
             if (ok) return
             SystemClock.sleep(100)
         }
-        throw AssertionError("Timeout: $message")
+        var detail = ""
+        ui { detail = "normal=${field("normalPlayback")}, playing=${runCatching { player().isPlaying }}, position=${runCatching { player().currentPosition }}, track=${field("currentTrackInfo")}" }
+        throw AssertionError("Timeout: $message ($detail)")
     }
     private fun test(name: String, block: () -> Unit) {
         count++
         try { block(); messages.append("PASS $name\n") }
         catch (e: Throwable) { failed++; messages.append("FAIL $name: ${e.stackTraceToString()}\n") }
-        sendStatus(0, Bundle().apply { putString("stream", messages.lines().lastOrNull { it.isNotBlank() }.orEmpty() + "\n") })
+        sendStatus(0, Bundle().apply { putString("stream", messages.lines().lastOrNull { it.startsWith("PASS ") || it.startsWith("FAIL ") }.orEmpty() + "\n") })
     }
     private fun capture(name: String) {
         // waitForIdleSync does not wait for SurfaceFlinger/rotation animations to finish.
@@ -85,18 +89,38 @@ class FullscreenInstrumentation : Instrumentation() {
         repeat(if (double) 2 else 1) {
             val now = SystemClock.uptimeMillis()
             val down = MotionEvent.obtain(now, now, MotionEvent.ACTION_DOWN, x, y, 0)
-            val up = MotionEvent.obtain(now, now + 60, MotionEvent.ACTION_UP, x, y, 0)
+            val up = MotionEvent.obtain(now, now + 30, MotionEvent.ACTION_UP, x, y, 0)
             down.source = android.view.InputDevice.SOURCE_TOUCHSCREEN
             up.source = android.view.InputDevice.SOURCE_TOUCHSCREEN
             // sendPointerSync waits for graphics transactions on every event; under video
             // rendering that can stretch two taps beyond Android's double-tap timeout.
             checkThat(uiAutomation.injectInputEvent(down, false), "DOWN injection failed")
-            SystemClock.sleep(60)
+            SystemClock.sleep(30)
             checkThat(uiAutomation.injectInputEvent(up, false), "UP injection failed")
             down.recycle(); up.recycle()
-            if (double) SystemClock.sleep(70)
+            if (double) SystemClock.sleep(40)
         }
         SystemClock.sleep(350)
+    }
+    private fun dragCaptionOnScreen(right: Boolean, bottom: Boolean) {
+        var x = 0f; var y = 0f; var dx = 0f; var dy = 0f
+        ui {
+            val c = layout().caption
+            val p = IntArray(2); c.getLocationOnScreen(p)
+            x = p[0] + c.width / 2f; y = p[1] + c.height / 2f
+            dx = (if (right) layout().width - 2f else 2f) - x
+            dy = (if (bottom) layout().height - 2f else 2f) - y
+        }
+        val start = SystemClock.uptimeMillis()
+        for (i in 0..12) {
+            val action = when (i) { 0 -> MotionEvent.ACTION_DOWN; 12 -> MotionEvent.ACTION_UP; else -> MotionEvent.ACTION_MOVE }
+            val event = MotionEvent.obtain(start, SystemClock.uptimeMillis(), action, x + dx * i / 12, y + dy * i / 12, 0)
+            event.source = android.view.InputDevice.SOURCE_TOUCHSCREEN
+            checkThat(uiAutomation.injectInputEvent(event, true), "Drag injection failed")
+            event.recycle()
+            SystemClock.sleep(20)
+        }
+        waitForIdleSync()
     }
     private fun touchWord() {
         var x = 0f; var y = 0f
@@ -173,9 +197,14 @@ class FullscreenInstrumentation : Instrumentation() {
                 await("inline double tap starts") { player().isPlaying }
                 SystemClock.sleep(3300)
                 ui { checkThat(!find(activity.window.decorView, "全屏播放")!!.isShown, "Inline controls did not auto-hide") }
+                ui {
+                    val controls = field("inlinePlayerControls") as InlinePlayerControls
+                    val location = IntArray(2); controls.getLocationOnScreen(location)
+                    x = location[0] + controls.width / 2f; y = location[1] + controls.height * .3f
+                }
                 touch(x, y, true)
                 await("inline double tap pauses") { !player().isPlaying }
-                ui { checkThat(field("normalPlayback") == false, "Inline gesture cancelled sentence mode") }
+                ui { checkThat(field("normalPlayback") == true, "Inline gesture failed to select continuous playback") }
                 touch(x, y)
                 ui { checkThat(!find(activity.window.decorView, "全屏播放")!!.isShown, "Inline single tap did not hide") }
                 ui { call("seekTo", 12000, false) }
@@ -300,6 +329,8 @@ class FullscreenInstrumentation : Instrumentation() {
                 val before = layout().caption.position
                 dragCaption(-100f, -160f)
                 checkThat(layout().caption.position != before, "Caption did not move")
+                ui { layout().showControls() }
+                click("字幕大小和位置设置")
                 val size = layout().caption.textSize
                 click("放大字幕")
                 checkThat(layout().caption.textSize > size, "Font did not increase")
@@ -315,6 +346,74 @@ class FullscreenInstrumentation : Instrumentation() {
                 click("解锁字幕位置和大小")
                 click("恢复字幕默认位置和大小")
                 click("字幕大小和位置设置")
+            }
+            test("caption_reaches_all_safe_edges_without_chrome_repositioning") {
+                ui { layout().overlay.performClick() }
+                for ((right, bottom) in listOf(false to false, true to false, true to true, false to true)) {
+                    dragCaptionOnScreen(right, bottom)
+                    ui {
+                        val c = layout().caption
+                        val insets = androidx.core.view.ViewCompat.getRootWindowInsets(layout())!!
+                        val bars = insets.getInsets(androidx.core.view.WindowInsetsCompat.Type.systemBars())
+                        val cutout = insets.getInsetsIgnoringVisibility(androidx.core.view.WindowInsetsCompat.Type.displayCutout())
+                        val margin = (4 * activity.resources.displayMetrics.density).toInt()
+                        val edgeX = if (right) layout().width - maxOf(bars.right, cutout.right) - margin else maxOf(bars.left, cutout.left) + margin
+                        val edgeY = if (bottom) layout().height - maxOf(bars.bottom, cutout.bottom) - margin else maxOf(bars.top, cutout.top) + margin
+                        checkThat(abs((if (right) c.right else c.left) - edgeX) <= 2, "Horizontal edge unreachable")
+                        checkThat(abs((if (bottom) c.bottom else c.top) - edgeY) <= 2, "Vertical edge unreachable")
+                        checkThat(field("lookupDialogOpen") == false, "Drag opened dictionary")
+                    }
+                    capture("15-edge-${if (right) "right" else "left"}-${if (bottom) "bottom" else "top"}")
+                }
+                var bounds = android.graphics.Rect()
+                ui { val c = layout().caption; bounds.set(c.left, c.top, c.right, c.bottom); layout().showControls() }
+                click("字幕大小和位置设置")
+                ui { val c = layout().caption; checkThat(bounds == android.graphics.Rect(c.left, c.top, c.right, c.bottom), "Settings moved caption") }
+                click("恢复字幕默认位置和大小")
+                click("字幕大小和位置设置")
+            }
+            test("navigation_alone_stops_once_even_with_loop_preference") {
+                ui { set("loopSentence", true); call("seekTo", 12000, false) }
+                await("before navigation") { abs(player().currentPosition - 12000) < 500 }
+                click("全屏下一句")
+                await("next started") { player().isPlaying && field("selectedIndex") == 1 }
+                ui { call("seekTo", 49500, true) }
+                await("next stops at sentence end") { !player().isPlaying && player().currentPosition >= 50000 }
+                ui { checkThat(field("normalPlayback") == false, "Navigation unexpectedly continuous"); set("loopSentence", false) }
+                capture("16-navigation-stopped-once")
+            }
+            test("play_after_sentence_end_continues_without_rewinding") {
+                click("播放或暂停")
+                await("continuous beyond selected sentence") { player().isPlaying && player().currentPosition > 51200 }
+                ui { checkThat(field("normalPlayback") == true, "Play retained sentence boundary") }
+                click("播放或暂停")
+                await("continuous pause") { !player().isPlaying }
+            }
+            test("play_during_previous_sentence_continues_across_boundary") {
+                ui { layout().showControls(); call("seekTo", 36000, false) }
+                await("before previous") { abs(player().currentPosition - 36000) < 500 }
+                click("全屏上一句")
+                await("previous preview started") { player().isPlaying && field("selectedIndex") == 0 }
+                ui { call("seekTo", 29000, true) }
+                await("previous near end") { player().isPlaying && player().currentPosition >= 29000 }
+                click("播放或暂停")
+                await("play crosses first boundary") { player().isPlaying && player().currentPosition > 31200 }
+                ui { checkThat(field("normalPlayback") == true, "Play paused active preview") }
+                ui { player().pause(); layout().showControls() }
+            }
+            test("double_tap_during_next_sentence_continues_across_boundary") {
+                click("全屏下一句")
+                await("next preview for double tap") { player().isPlaying && field("selectedIndex") == 1 }
+                ui { call("seekTo", 48000, true) }
+                await("double tap near end") { player().isPlaying && player().currentPosition >= 48000 }
+                touch(layout().width * .5f, layout().height * .35f, true)
+                await("double tap crosses second boundary") { player().isPlaying && player().currentPosition > 51200 }
+                ui { checkThat(field("normalPlayback") == true, "Double tap retained sentence mode") }
+                capture("17-continuous-past-sentence")
+                touch(layout().width * .5f, layout().height * .35f, true)
+                await("double tap pauses continuous playback") { !player().isPlaying }
+                ui { call("seekTo", 12000, false); set("selectedIndex", 0); call("updateCurrentCaption"); layout().showControls() }
+                await("reset after continuous tests") { abs(player().currentPosition - 12000) < 500 }
             }
             test("playing_continues_controls_hide_and_word_lookup_pauses_resumes") {
                 ui { set("normalPlayback", true); call("toggleFullscreenPlayback") }
@@ -352,7 +451,7 @@ class FullscreenInstrumentation : Instrumentation() {
                 capture("05-safe-area-long-caption")
                 ui {
                     @Suppress("UNCHECKED_CAST") val subtitles = field("subtitles") as MutableList<Any>
-                    subtitles.clear(); subtitles.addAll(originalLines); call("updateCurrentCaption")
+                    subtitles.clear(); subtitles.addAll(originalLines); call("updateCurrentCaption"); layout().showControls()
                 }
             }
             test("real_single_double_tap_and_locked_word_lookup") {

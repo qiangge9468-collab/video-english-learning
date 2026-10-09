@@ -87,13 +87,14 @@ internal class FullscreenPlayerLayout(
         caption.textSize = fontSp
         caption.visibility = GONE
         caption.position = FullscreenSubtitlePosition(
-            preferences.getFloat("x", .5f), preferences.getFloat("y", .86f)
+            preferences.getFloat("x", .5f), preferences.getFloat("y", .72f)
         )
         caption.locked = preferences.getBoolean("locked", false)
         caption.onPositionSaved = {
             preferences.edit().putFloat("x", it.x).putFloat("y", it.y).apply()
         }
         caption.onInteraction = { if (controlsShown) scheduleHide() }
+        caption.onDragStarted = { hideControls() }
         overlay.addView(caption, LayoutParams(-2, -2))
         top.gravity = Gravity.CENTER_VERTICAL
         top.background = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(0x99000000.toInt(), Color.TRANSPARENT))
@@ -203,11 +204,11 @@ internal class FullscreenPlayerLayout(
         subtitleToggle.contentDescription = if (subtitlesEnabled) "关闭全屏字幕" else "开启全屏字幕"
     }
 
-    fun updatePlayback(isPlaying: Boolean, positionMs: Int, durationMs: Int) {
+    fun updatePlayback(isPlaying: Boolean, positionMs: Int, durationMs: Int, continuous: Boolean = true) {
         val changed = playing != isPlaying
         playing = isPlaying
         duration = durationMs.coerceAtLeast(0)
-        val label = if (playing) "暂停" else "播放"
+        val label = if (playing && continuous) "暂停" else "播放"
         if (play.text != label) play.text = label
         if (!draggingSeek) {
             val text = timeText(positionMs, duration)
@@ -280,10 +281,9 @@ internal class FullscreenPlayerLayout(
         video.layout(bounds.left, bounds.top, bounds.right, bounds.bottom)
         overlay.layout(0, 0, width, height)
         if (fullscreen) {
-            // Keep the expanded size/lock panel clear of the caption too. The saved
-            // normalized position is unchanged when this temporary panel closes.
-            val bottomClearance = if (controlsShown && settings.visibility == VISIBLE) 140 else 92
-            val area = Rect(safe.left + dp(16), safe.top + dp(60), width - safe.right - dp(16), height - safe.bottom - dp(bottomClearance))
+            // Chrome is temporary, not a reserved caption zone. Use the entire safe
+            // screen, including letterboxing; controls must never move the caption.
+            val area = Rect(safe.left + dp(4), safe.top + dp(4), width - safe.right - dp(4), height - safe.bottom - dp(4))
             val maxWidth = (area.width() * .9f).toInt().coerceAtLeast(1)
             val maxHeight = area.height().coerceAtLeast(1)
             fun measureCaption() = caption.measure(MeasureSpec.makeMeasureSpec(maxWidth, MeasureSpec.AT_MOST), MeasureSpec.makeMeasureSpec(0, MeasureSpec.UNSPECIFIED))
@@ -338,6 +338,7 @@ internal class DraggableCaption(context: Context) : TextView(context) {
     var travelBounds = Rect()
     var onPositionSaved: (FullscreenSubtitlePosition) -> Unit = {}
     var onInteraction: () -> Unit = {}
+    var onDragStarted: () -> Unit = {}
     private val slop = ViewConfiguration.get(context).scaledTouchSlop
     private var downX = 0f
     private var downY = 0f
@@ -363,7 +364,10 @@ internal class DraggableCaption(context: Context) : TextView(context) {
             }
             MotionEvent.ACTION_MOVE -> {
                 val dx = event.rawX - downX; val dy = event.rawY - downY
-                if (abs(dx) > slop || abs(dy) > slop) moved = true
+                if (!moved && (abs(dx) > slop || abs(dy) > slop)) {
+                    moved = true
+                    if (!locked) onDragStarted()
+                }
                 if (moved && !locked) {
                     val x = (originalX + dx).toInt().coerceIn(travelBounds.left, travelBounds.right)
                     val y = (originalY + dy).toInt().coerceIn(travelBounds.top, travelBounds.bottom)

@@ -4,6 +4,8 @@ This directory is intentionally tracked so GitHub users can install the Android 
 
 Expected files:
 
+2026-10-09 bug fix: `app-v2.2.0.apk` now allows subtitle dragging across the full cutout/system-bar-safe screen, without permanent title/control reservations. Previous/next previews play once; pressing play or double-tapping then switches to continuous playback from the current position, even during a preview. Version name/code remain 2.2.0/29. Install over the existing app; the pre-fix APK is preserved in commit `3318af3`.
+
 The latest `app-v2.2.0.apk` also includes a persistent fullscreen subtitle visibility switch under the subtitle settings. It works while position/size are locked, keeps tracking the current sentence while hidden, and does not change learning-page captions or translation settings. Burned-in video captions cannot be hidden. This update keeps both versionName 2.2.0 and versionCode 29 unchanged; re-download and install over the existing app. The previous package remains in commit `5a3eee1`.
 
 - `app-v2.2.0.apk`: current recommended phone package (versionName 2.2.0, versionCode 29). Includes the fullscreen control-layout bug fix: edge-to-edge gradients with cutout-safe controls, previous/next sentence actions, and inline video controls that appear on single tap, with double-tap playback. Time, progress and fullscreen entry now live inside the learning-page video. Keeps current-sentence bilingual subtitles, dragging/resizing/locking and word lookup. Pair with the existing v2.1.0 computer service. The original versionCode 28 APK remains available at Git commit `47d1145`; all other versioned APKs remain untouched.

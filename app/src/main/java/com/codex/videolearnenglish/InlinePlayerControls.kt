@@ -63,10 +63,10 @@ internal class InlinePlayerControls(
     fun showControls() { bar.visibility = VISIBLE; scheduleHide() }
     fun resetControls() { bar.visibility = INVISIBLE; removeCallbacks(hide) }
     fun setSeeking(value: Boolean) { seeking = value; if (value) showControls() else scheduleHide() }
-    fun updatePlayback(value: Boolean) {
+    fun updatePlayback(value: Boolean, continuous: Boolean = true) {
         val changed = playing != value
         playing = value
-        play.text = if (value) "Ⅱ" else "▶"
+        play.text = if (value && continuous) "Ⅱ" else "▶"
         if (changed) scheduleHide()
     }
     private fun scheduleHide() {
